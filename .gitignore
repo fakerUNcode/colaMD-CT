@@ -1,0 +1,19 @@
+node_modules/
+dist/
+release/
+*.log
+.DS_Store
+*.env
+log.md
+mobile/ios/build/
+mobile/ios/ColaMDReader.xcodeproj/project.xcworkspace/
+mobile/ios/ColaMDReader.xcodeproj/xcuserdata/
+vscode-extension/*.vsix
+dist-web/
+
+# tsc -b 的增量缓存（项目的类型检查走 tsc -p <cfg> --noEmit，不会产出它）
+*.tsbuildinfo
+
+# ColaMD CT 构建辅助：下载的 electron 分发包与解压目录不入库（合计 ~370MB）
+build-tools/*.zip
+build-tools/electron-dist*/

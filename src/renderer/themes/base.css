@@ -1,0 +1,1982 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+  background: var(--bg-color);
+  color: var(--text-color);
+}
+
+:root {
+  /* The single top row's height, in one place: the row itself, the editor and
+     the panel all sit on this number, and the main process's TITLEBAR_HEIGHT
+     (which Windows uses for the system buttons) has to agree with it. Shorter
+     rows make the chrome lighter, but 28px controls need air around them, and
+     the macOS traffic lights are centred against it (trafficLightPosition.y =
+     rowHeight / 2 - 8). */
+  --chrome-row-height: 36px;
+  /* Zero: the strip lives inside the top row, so the editor starts right below
+     it and nothing below needs a second offset. */
+  --tab-bar-height: 0px;
+  --editor-top-gap: 0px;
+}
+
+/* The room the panel's column takes out of the right-hand end of the row. Zero
+   when the panel is hidden, so one expression covers both states. */
+body.show-file-panel {
+  --panel-column: var(--file-panel-width, 220px);
+  --editor-region-width: calc(100% - var(--file-panel-width, 220px));
+}
+
+/* The file panel is fixed so it can remain shell furniture, rather than taking
+   part in the document's scroll. The document region must nevertheless claim
+   only the remaining width: otherwise a centred reading column stays centred in
+   the whole window and appears off-centre as soon as the panel opens. */
+body.show-file-panel.panel-left {
+  --editor-region-offset: var(--file-panel-width, 220px);
+}
+
+/* 正文要避开的那一列。默认两边都是 0，面板显示时才有一边非零，
+   这样下面每条表达式都不用再判断面板开没开。 */
+body {
+  --panel-inset-left: 0px;
+  --panel-inset-right: 0px;
+}
+
+/* 面板是一列浮在窗口上的纸（position: fixed），它不占布局，所以避让只能自己写：
+   右停靠让右边，左停靠让左边（#143）。同一对值同时给渲染模式与源码模式用，
+   两边正文于是永远落在同一块可见区域里，切换模式时文字不会横向跳（#48）。 */
+body.show-file-panel {
+  --panel-inset-right: 0px;
+}
+
+body {
+  /* One chrome colour for the single top row. These MUST live on body, never
+     on :root: the themes override --bg-color/--text-color on body.theme-*, and
+     html never sees those overrides, so a :root definition bakes the light
+     theme's mix in and the titlebar stops following the theme entirely
+     (2026-09-15, found in the dark themes where the row stayed light grey and
+     the buttons vanished into it). Custom properties resolve where they are
+     DEFINED, not where they are used. */
+  --chrome-bg: color-mix(in srgb, var(--text-color) 6%, var(--bg-color));
+  /* Fully opaque, so the hovered tab and the close button that covers text use
+     one solid colour instead of stacking translucent layers. */
+  --chrome-bg-hover: color-mix(in srgb, var(--text-color) 6%, var(--chrome-bg));
+  /* Every seam in the shell: tab boundaries, the row's baseline, the panel's
+     edge. ONE opaque colour, not a translucent one: a translucent hairline is
+     resolved against whatever is underneath, so the same value came out as two
+     different lines where the surface changed — the panel's edge read lighter
+     below the row than in it, and looked like two lines meeting (2026-09-15). */
+  --shell-line: color-mix(in srgb, var(--text-color) 5%, var(--chrome-bg));
+  /* Every icon control in the row — the plus, the word count, the source
+     toggle, the file-panel toggle — reads at this one grey. They report nothing
+     by weight: no hover step, no lit on-state, no dimmed disabled step. */
+  --row-icon-color: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  --search-match-bg: color-mix(in srgb, var(--link-color) 18%, transparent);
+  --search-match-current-bg: color-mix(in srgb, var(--link-color) 32%, transparent);
+  /* The reading column's width. A comfort setting, not a document property: the
+     View menu's Text Width switches the two body classes below, and everything
+     that lays text out reads this one value (the editor, source mode, and an
+     export snapshot, which carries the body class with it). */
+  --editor-column-width: 780px;
+}
+
+/* 代码块里的 token 配色（语法高亮）。
+   两套：深色代码底一套、浅色代码底一套。用哪一套由 theme-manager 按 --code-block-bg
+   的明暗决定（和 Mermaid 图同一个判据——elegant、bear 是浅色主题却配深色代码块），
+   在 body 上加 .code-palette-light 切换。
+   为什么不逐主题写进 12 个主题文件：自定义主题只有一份 :root 变量，逐主题写会漏掉它们。 */
+body {
+  --code-keyword: #c678dd;
+  --code-string: #98c379;
+  --code-comment: #7f848e;
+  --code-number: #d19a66;
+  --code-function: #61afef;
+  --code-type: #e5c07b;
+  --code-property: #e06c75;
+  --code-meta: #56b6c2;
+}
+
+/* 浅色代码底的那几个主题（light、sepia、notion、writer） */
+body.code-palette-light {
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-comment: #6e7781;
+  --code-number: #0550ae;
+  --code-function: #8250df;
+  --code-type: #953800;
+  --code-property: #116329;
+  --code-meta: #6639ba;
+}
+
+/* Text Width, from the View menu. `standard` needs no class: it is the value
+   body already carries. 640 is a comfortable measure on a narrow window, 1080
+   answers the wide displays where the default leaves two large margins. */
+body.page-width-narrow { --editor-column-width: 640px; }
+body.page-width-wide { --editor-column-width: 1080px; }
+
+#titlebar {
+  /* The single top row. The strip, the save status and the three buttons are
+     all flex children of THIS element: one surface, one baseline, one stacking
+     order. (58f66f4 floated the strip above it with z-index 31; the broken
+     baseline, the wrong colour and the dead buttons all came from that split.)
+     Left padding clears the macOS traffic lights. */
+  -webkit-app-region: drag;
+  height: var(--chrome-row-height);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  /* The left of the row belongs to the document: the strip starts after the
+     traffic lights (they end at 68px; 16px of clearance read as crowded, 28px
+     sits right) and the file panel docks on the RIGHT, so the tabs never shift
+     when it opens. */
+  padding: 0 6px 0 96px;
+  background: var(--chrome-bg, transparent);
+  position: relative;
+  /* Tooltips inside the titlebar must paint above the editor. */
+  z-index: 30;
+}
+
+/* The clearance above belongs to the traffic lights. macOS hides them in full
+   screen and no other platform has them, so the strip starts on the window's own
+   left edge there instead of leaving 96px of empty chrome (2026-09-15). */
+body.fullscreen #titlebar,
+body.platform-non-mac #titlebar {
+  padding-left: 6px;
+}
+
+/* Windows paints its window controls inside this row (titleBarOverlay) instead of
+   in a title bar of its own, which is what turns three stacked bars into one row.
+   The controls are drawn over the web content, so the row keeps their width clear:
+   env() reports the area the OS left us, and the 138px fallback is the Windows 11
+   control cluster when the variable is unavailable. */
+body.platform-win #titlebar {
+  padding-right: calc(100vw - env(titlebar-area-width, calc(100vw - 138px)) + 6px);
+}
+
+/* The row's one baseline. It is its own element rather than an inset shadow
+   because the active tab has to be able to cover it: the tab is opaque paper
+   flush with the bottom of the row, so the line is cut where the tab opens into
+   the document. */
+#titlebar::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--shell-line);
+}
+
+/* The panel's column is a column below the row, and only below it: the row keeps
+   its own surface across the full width. Carrying the seam up through the row
+   (2.4.0) put a vertical line in the chrome at the row's right end, which read as
+   a stray mark rather than as an edge — there is no surface change up there to
+   justify a line (2026-09-15). */
+
+#save-status {
+  /* A flex member of the row, left of the button cluster. The free space in the
+     row collects HERE, between the plus and the save status, so the strip stays
+     next to its tabs and the right-hand group stays pinned to the right edge. */
+  margin-left: auto;
+  flex: none;
+  margin-right: 2px;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+}
+
+/* Only unsaved edits are announced; a successful save fades out silently. */
+#save-status.pending {
+  opacity: 0.55;
+}
+
+/* Tabs are created from the File menu / ⌘T, from the file list (⌘-click or the
+   right-click menu), and from the plus at the end of the strip, which appears
+   together with the strip. There is deliberately no plus in the title bar: it
+   would disappear the moment the strip shows up. */
+#tab-bar {
+  /* The strip is the titlebar's first flex child, not a floating sibling. It
+     hugs its tabs and shrinks when they run out of room: min-width: 0 lets it,
+     and overflow scrolls the tabs. It paints nothing of its own: the surface and
+     the baseline belong to the titlebar. It may not run past the panel's column
+     either — the tabs belong to the document's side of the row. */
+  flex: 0 1 auto;
+  min-width: 0;
+  /* …and it stops one plus-button short of the column, so that button lands just
+     inside the document's side of the row rather than on the panel's paper. */
+  max-width: calc(100% - var(--panel-column, 0px) - 36px);
+  align-self: stretch;
+  display: flex;
+  /* Tabs fill the row instead of floating inside it: no gap and no separator
+     lines, because the paper against the chrome is the whole reading. */
+  align-items: stretch;
+  gap: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  background: transparent;
+  -webkit-app-region: drag;
+}
+
+#tab-bar[hidden] {
+  display: none;
+}
+
+#tab-bar::-webkit-scrollbar {
+  display: none;
+}
+
+/* The plus carries no styling of its own: it is one of the row's icon controls
+   (#titlebar > button), so it is the same size, the same grey, and reports
+   nothing by weight. It sits right after the strip, and `.tab-new-btn` survives
+   as the hook the renderer finds it by. */
+
+.tab-entry {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  /* A tab hugs its filename, inside a floor and a ceiling that are both READ
+     OFF the row's height, so they follow it instead of a past one: twice it so
+     a short name never collapses to a bare square, four times it so a long one
+     stops growing. In between the name decides, and when the row runs out the
+     tabs compress to the floor before the strip starts scrolling. Written as
+     the row's multiples rather than as millimetres of a remembered row: these
+     two numbers used to be 80/160, which was 2x/4x of the 40px row and stayed
+     there when the row became 36px (2026-09-20). */
+  min-width: calc(var(--chrome-row-height) * 2);
+  max-width: calc(var(--chrome-row-height) * 4);
+  /* Full row height: the active tab is a column of paper running from the
+     window's top edge down into the document, not a chip inside the row. */
+  height: 100%;
+  /* Symmetric: 16px either side, roomier than the air the name gets above and
+     below, so a label reads as sitting in the tab rather than filling it. */
+  padding: 0 16px;
+  border: 1px solid transparent;
+  /* No top edge and no bottom edge. The bottom stays open so the active tab
+     runs into the document; the top would sit on the window's own top edge,
+     where a hairline reads as a seam in the sky. */
+  border-top: none;
+  border-bottom: none;
+  /* Every tab marks its LEFT edge, full height: the line runs from the window's
+     top edge down to the row's baseline, so the tabs read as one connected row
+     of columns rather than as names floating over chrome. The first tab is
+     marked too, which is where the strip begins. */
+  border-left-color: var(--shell-line);
+  /* Square on purpose: a full-height tab meets the window's top edge, where a
+     radius reads as a notch. */
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: default;
+  -webkit-app-region: no-drag;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tab-entry:hover {
+  background: var(--chrome-bg-hover);
+  color: var(--text-secondary, var(--text-color));
+}
+
+/* The active tab wears the paper colour with no bottom edge, so it opens into the
+   document. No shadow, and no accent line either: the paper set
+   against the chrome is the active state, and a 1px theme line on top of it made the
+   strip shout for attention. */
+.tab-entry.active {
+  background: var(--bg-color);
+  /* Its edges carry the same hairline as every other boundary: the active state
+     is the paper column itself, not a heavier line around it. */
+  border-color: var(--shell-line);
+  color: var(--text-color);
+}
+
+/* The active tab already lays a full-height edge against its right neighbour,
+   so the neighbour gives up its own mark there instead of doubling up. */
+.tab-entry.active + .tab-entry {
+  border-left-color: transparent;
+}
+
+.tab-entry-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* The label's box has to be TALLER than its glyphs, not exactly as tall. With
+     line-height 1 the ink filled the box edge to edge, and a CJK font with a
+     roomier em box (Windows) had the bottom of its strokes cut off by the
+     overflow clip below. 20px of box around ~16px of ink leaves 2px of air each
+     side on every platform's font (2026-09-15). */
+  line-height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tab-entry.dirty::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+}
+
+/* The close button floats over the tab: no width, no padding, nothing reserved
+   at rest, so a resting tab hugs its filename exactly. When it shows it masks the
+   text behind it with a fully opaque surface colour, and it is never translucent:
+   a faded button lets the tab name read straight through it. Quietness comes from
+   the muted glyph colour, not from an opacity on the button. */
+.tab-entry-close {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  transform: translateY(-50%);
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: var(--chrome-bg-hover);
+  color: inherit;
+  opacity: 0;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transition: opacity 0s, background 0.12s, color 0.12s;
+}
+
+/* 16×16 是保持「静止的标签恰好贴着文件名」所需的可见尺寸，但它低于 24×24
+   的最小点击热区。这一圈不可见的外扩把热区补到 24×24：它不绘制任何东西，
+   所以按钮用来遮住背后文字的实色底仍然是 16×16；它绝对定位，所以不参与
+   flex 排版，标签宽度与行高一个像素都不动。按钮静止时 pointer-events 为 none，
+   伪元素继承，于是看不见的时候也不会被点到。 */
+.tab-entry-close::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+
+.tab-entry.active .tab-entry-close {
+  background: var(--bg-color);
+}
+
+.tab-entry:hover .tab-entry-close,
+.tab-entry-close:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  /* A resting tab's surface fades in over 0.15s: wait for it, so the opaque mask
+     never lands on a half-transparent tab. */
+  transition: opacity 0s 0.15s, background 0.12s, color 0.12s;
+}
+
+/* The active tab's paper surface never fades, so its close button pops at once. */
+.tab-entry.active:hover .tab-entry-close,
+.tab-entry.active .tab-entry-close:focus-visible {
+  transition: opacity 0s, background 0.12s, color 0.12s;
+}
+
+.tab-entry-close:hover {
+  background: color-mix(in srgb, var(--text-color) 14%, var(--chrome-bg-hover));
+  color: var(--text-color);
+}
+
+.tab-entry.active .tab-entry-close:hover {
+  background: color-mix(in srgb, var(--text-color) 12%, var(--bg-color));
+}
+
+/* One floating label, used by the strip and by the file panel. */
+#hover-tip {
+  position: fixed;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text-color) 86%, transparent);
+  color: var(--bg-color);
+  font-size: 11px;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 60;
+}
+
+#hover-tip[hidden] {
+  display: none;
+}
+
+/* The three titlebar buttons share ONE box rule: same size, same radius, same
+   colour. They also share one weight, always: no hover step, no disabled step,
+   no on-state. A control that lights up — or dims — pulls the eye row-ward, and
+   both states it could report are plain to see by themselves (2026-09-15).
+   The .active class survives as the state marker; nothing styles it. */
+#titlebar > button {
+  width: 28px;
+  height: 28px;
+  margin-left: 8px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--row-icon-color);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+
+/* `display: flex` above outranks the UA rule for [hidden], so the attribute has
+   to be honoured explicitly: the menu button only exists on Windows, and an
+   invisible-looking 28px box would still sit in the row and push the others. */
+#titlebar > button[hidden] {
+  display: none;
+}
+
+/* The Windows menu button is the row's first child, so it gets its own air
+   instead of the 8px gap the right-hand cluster uses: the row's 6px gutter is
+   its left margin, and 6px on the right puts the glyph exactly halfway between
+   the window's edge and the line the document's strip starts on. Inheriting the
+   shared margin-left left it jammed against the first tab (2026-09-15). */
+#titlebar > #app-menu-btn {
+  margin-left: 0;
+  margin-right: 6px;
+}
+
+/* One focus ring for the whole shell, drawn in the theme's own ink. The platform
+   default follows the SYSTEM accent colour, so a keyboard focus inside a
+   monochrome row came out orange on macOS (2026-09-15) and would come out a
+   different colour on every machine, in neither case the theme's. Colour accents
+   belong to the document; the shell reports focus with weight and shape. */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text-color) 40%, transparent);
+  outline-offset: 1px;
+}
+
+/* The close button sits INSIDE its tab, so its ring has to grow inward: an
+   outward one would paint over the neighbouring tab's edge. */
+.tab-entry-close:focus-visible {
+  outline-offset: -2px;
+}
+
+/* The tooltip reveal is its own rule, apart from anything that changes colour:
+   58f66f4 fused the hover selectors into the tip's block, which teleported and
+   hid the buttons on hover (the "flicker / unclickable" bug). */
+.toolbar-tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  padding: 4px 9px;
+  border-radius: 6px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  color: var(--text-color);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-3px);
+  /* No opacity transition: a hover label is either fully visible or not there
+     at all. A fade reads as a transparent label over the document text. */
+  transition: transform 0.15s;
+}
+
+#titlebar > button:hover .toolbar-tip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#word-count {
+  cursor: default;
+}
+
+#editor-region {
+  width: var(--editor-region-width, 100%);
+  height: calc(100vh - var(--chrome-row-height) - var(--tab-bar-height, 0px));
+  margin-left: var(--editor-region-offset, 0px);
+}
+
+/* The panel does not push the document; it is fixed shell furniture. Give the
+   visible document region the same short motion so the reading column follows
+   the new centre instead of jumping after the panel has arrived. */
+body.panel-motion-ready #editor-region {
+  transition: width 180ms cubic-bezier(0.2, 0, 0, 1), margin-left 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+#editor {
+  position: relative; /* anchor for the absolutely-positioned code copy button */
+  height: 100%;
+  overflow-y: auto;
+  /* 正常情况没有内边距。正文那 40px 呼吸留白搬到 .cm-content 上（见 themes/editor-preview.css），
+     两个理由都是看得见的：
+       1. CodeMirror 的滚动容器是 .cm-scroller，它在 #editor 的内边距之内。旧版（Milkdown）
+          滚动发生在 #editor 自己身上，滚动条贴窗口右缘；留着这 40px，滚动条就会缩进 40px，
+          浮在留白中间。
+       2. 内边距留在外层，限宽就只能靠 max-width，而 .cm-content 是 flex 子项、
+          baseTheme 给了它 flex-grow: 2，剩余空间被它先吃掉，自动外边距吸不到东西，
+          正文会左对齐（实测窗口 1623px、正文 640px 贴左边）。
+     唯一一处例外是面板那一列（#143）：它是两三百像素的让位，不是呼吸留白。那点宽度要么
+     让 #editor 留出来（滚动条落在面板边缘），要么就让正文和滚动条一起待在面板底下。
+     正文仍然靠 .cm-content 的自动外边距在剩下的宽度里居中，flex: 0 0 auto 保证它吸得到空间。 */
+  padding: 0 var(--panel-inset-right, 0px) 0 var(--panel-inset-left, 0px);
+}
+
+#source-editor {
+  display: none;
+  height: 100%;
+  width: 100%;
+  /* 跟渲染模式同一个阅读列宽，切模式时文字不会跳位置（#48），并且跟它落在
+     同一块可见区域里（#143）。
+     居中还是用 max-width + 自动外边距，不用内边距算：内边距里的百分比是按
+     **父容器**宽度解析的，不是元素自己的宽度，公式会算错（实测过）。 */
+  max-width: calc(var(--editor-column-width) + 80px + var(--panel-inset-left, 0px) + var(--panel-inset-right, 0px));
+  margin: 0 auto;
+  /* 面板那一列算进内边距：盒子按「列宽 + 两侧让位」居中，正文于是落在可见
+     区域中间，而不是整窗中间。面板在右时这两者差 110px，看得出来（实测）。 */
+  padding: calc(40px + var(--editor-top-gap, 0px)) calc(40px + var(--panel-inset-right, 0px)) 40px calc(40px + var(--panel-inset-left, 0px));
+  box-sizing: border-box;
+  border: none;
+  outline: none;
+  resize: none;
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-family: 'SF Mono', 'Fira Code', Menlo, Monaco, monospace;
+  font-size: 14px;
+  line-height: 1.7;
+  tab-size: 2;
+}
+
+#source-editor.visible {
+  display: block;
+}
+
+/* Same-directory file panel */
+#file-panel {
+  position: fixed;
+  top: calc(var(--chrome-row-height) + var(--tab-bar-height, 0px));
+  right: 0;
+  bottom: 0;
+  width: var(--file-panel-width, 220px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-color);
+  /* The same hairline as the row's dividers and its baseline: every seam in the
+     shell is one weight, and --border-color stays for things INSIDE a surface
+     (cards, modals, tables), where a quieter line would read as an accident. */
+  border-left: 1px solid var(--shell-line);
+  overflow-y: auto;
+  padding: 10px 8px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(100%);
+}
+
+#file-panel[hidden] {
+  display: none;
+}
+
+body.panel-motion-ready #file-panel {
+  transition: transform 180ms cubic-bezier(0.2, 0, 0, 1), opacity 120ms ease-out;
+}
+
+body.show-file-panel #file-panel {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+/* With the panel shown, the strip starts on the panel's edge line: the first tab
+   sits exactly on the line the panel draws down the window, so the panel's right
+   edge and the tab's left edge are one vertical. The band itself still spans the
+   window — the panel starts below it, and nothing is cut. */
+/* Edge hot zone for resizing the panel; deliberately handle-free — the divider
+   itself is the whole affordance (design.md). The hit area is 7px wide and
+   centred on the border's own column (the panel is border-box, so its 1px edge
+   sits in the last pixel), which puts the feedback exactly ON the line instead of
+   next to it. The tint is neutral: an accent colour belongs to the document, and
+   this is shell furniture. */
+#panel-resizer {
+  position: fixed;
+  top: calc(var(--chrome-row-height) + var(--tab-bar-height, 0px));
+  bottom: 0;
+  right: calc(var(--file-panel-width, 220px) - 4px);
+  width: 7px;
+  cursor: col-resize;
+  z-index: 6;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+body.panel-motion-ready #panel-resizer {
+  transition: opacity 120ms ease-out;
+}
+
+body.show-file-panel #panel-resizer {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 3px in: the border's column inside a 7px hit area. */
+#panel-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+/* The panel can sit on either side (View menu, 2026-09-20). Deliberately the
+   smallest version of it: the panel and the room it claims move, the row does
+   not. The buttons stay at the right end where they have always been, and the
+   strip keeps the whole row instead of stopping one column short of it, because
+   the column it stopped short of is now on the other side. */
+body.panel-left #file-panel {
+  left: 0;
+  right: auto;
+  border-left: 0;
+  border-right: 1px solid var(--shell-line);
+  transform: translateX(-100%);
+}
+
+body.panel-left.show-file-panel #file-panel {
+  transform: translateX(0);
+}
+
+body.panel-left #panel-resizer {
+  left: calc(var(--file-panel-width, 220px) - 4px);
+  right: auto;
+}
+
+body.panel-left.show-file-panel {
+  --panel-column: 0px;
+  --panel-inset-left: 0px;
+  --panel-inset-right: 0px;
+}
+
+/* The button cannot follow the panel to the left end (it stays where it has
+   always been), so the icon is the only thing left that can point at the list:
+   the same mirror the file-list icon got when the panel moved right (2026-09-15). */
+body.panel-left #file-toggle-btn svg {
+  transform: scaleX(-1);
+}
+
+/* Motion must never be the only way to understand the panel state. Readers who
+   ask the OS to reduce movement get the same final layout immediately. */
+@media (prefers-reduced-motion: reduce) {
+  body.panel-motion-ready #editor-region,
+  body.panel-motion-ready #file-panel,
+  body.panel-motion-ready #panel-resizer {
+    transition: none;
+  }
+}
+
+#panel-resizer:hover::after,
+#panel-resizer.dragging::after {
+  background: color-mix(in srgb, var(--text-color) 24%, transparent);
+}
+
+body.panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.file-panel-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  margin: 0 0 8px;
+  padding: 2px;
+  /* One rectangle, not two: the tray carries a surface and nothing else, so the
+     active chip can wear the tabs' exact recipe — paper plus the same 1px
+     hairline — and the sidebar and the strip say "chosen" the same way. */
+  border: none;
+  /* Concentric with the chip inside it: outer radius = inner 4px + the 2px
+     inset, so the two outlines stay the same distance apart all the way round
+     the corner. 6px is also the radius the title-bar buttons already use. */
+  border-radius: 6px;
+  /* The tray is the theme's raised chrome surface, not a hardcoded grey: a
+     hardcoded tint sits at the same luminance as the paper chip in dark themes
+     and the active state dissolves (2026-09-15). With --chrome-bg the chip
+     (paper) reads as pressed-in on dark and lifted on light. */
+  background: var(--chrome-bg);
+}
+
+.file-panel-tabs button {
+  /* 26px inside a 2px tray: the switch's whole box is 30px, the height of a
+     tab, and the chip inside sits a step below the tab so the control does not
+     outweigh the document's own chip. */
+  min-height: 26px;
+  /* Transparent, not absent: the active chip adds the hairline, and a border
+     that appears only when chosen would shift the label by a pixel. */
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.file-panel-tabs button:hover {
+  color: var(--text-color);
+}
+
+.file-panel-tabs button.active {
+  background: var(--bg-color);
+  color: var(--text-color);
+  /* Deliberately no shadow: a raised chip reads as hardware in an otherwise
+     flat shell (2026-09-15). The tray/chip contrast alone carries the state. */
+}
+
+#file-list,
+#outline-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#file-list button,
+#outline-list button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* Chevron slot: reserved for files too, so names line up along one column at
+   every depth. Expanded levels point down. */
+.file-entry-chevron {
+  display: inline-flex;
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: transform 120ms ease;
+}
+
+.file-entry-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.file-entry-chevron svg {
+  display: block;
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.file-entry-icon {
+  display: inline-flex;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.file-entry-icon svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.file-entry-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#outline-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+#file-list[hidden],
+#outline-list[hidden] {
+  display: none;
+}
+
+#outline-list button {
+  line-height: 1.4;
+}
+
+#outline-list button.empty {
+  color: var(--text-muted);
+  cursor: default;
+  font-style: italic;
+}
+
+#outline-list button.empty:hover {
+  background: transparent;
+}
+
+/* Names are shortened with an ellipsis and spelled out in the hover label;
+   they are never scrolled, which covers the row it belongs to. */
+
+#file-list button:hover,
+#outline-list button:hover {
+  background: color-mix(in srgb, var(--text-color) 14%, transparent);
+}
+
+#file-list .file-empty {
+  padding: 4px 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+/* Active entry in both lists: a NEUTRAL raised surface, not an accent colour.
+   The reading position is location, not importance, so it gets the same quiet
+   lifted chip in every theme (--chrome-bg-hover derives from the theme, stays
+   visible on dark and light); colour accents belong to the document, not the
+   shell. The old hardcoded orange (#F1752D) ignored themes entirely. */
+#file-list button.active,
+#outline-list button.active {
+  background: var(--chrome-bg-hover);
+  color: var(--text-color);
+}
+
+/* Outline-jump feedback: the landing heading flashes once and fades (#64). */
+@keyframes heading-flash {
+  0% {
+    background-color: color-mix(in srgb, var(--link-color) 28%, transparent);
+  }
+  70% {
+    background-color: color-mix(in srgb, var(--link-color) 14%, transparent);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.cm-md-jump-flash {
+  animation: heading-flash 1.6s ease-out;
+  border-radius: 4px;
+}
+
+#file-list button.directory {
+  color: var(--text-color);
+  font-weight: 500;
+}
+
+/* The parent row is a row like the others: same radius, same hover, same text
+   colour. It used to be squared off with a rule under it, which broke both the
+   hover highlight and the shell's line rule. */
+#file-list button.parent {
+  margin-bottom: 4px;
+}
+
+#editor.hidden {
+  display: none;
+}
+
+/* CodeMirror 的根节点。旧版这里是 Milkdown 的包装层 `.milkdown`，结构换成 CM6 之后
+   不需要了：`.cm-content` 自己撑满 `.cm-scroller`，点击正文下方空白仍能落光标。
+   编辑器的高度、阅读列宽与正文排版都在 themes/editor-preview.css 里。 */
+
+/* 旧版的正文排版（h1..h6、p、a、strong、code、pre、blockquote、ul/ol/li、任务列表、
+   mark、table、hr、img、::selection、mermaid 图）写在这里，选择器全部指向 `.ProseMirror`。
+   CodeMirror 不产出这些元素，规则已整片搬到 themes/editor-preview.css 的 `.cm-md-*`
+   行类与 mark 类上。删掉而不是留着：留着的死选择器会让下一个人照它改样式，改不动又找不到原因。 */
+
+/* ======= THEMES ======= */
+
+:root, body.theme-light {
+  --bg-color: #ffffff;
+  --text-color: #24292f;
+  --text-secondary: #656d76;
+  --text-muted: #656d76;
+  --border-color: #dce1e6;
+  --link-color: #0969da;
+  --code-bg: rgba(175, 184, 193, 0.2);
+  --code-block-bg: #f6f8fa;
+  --blockquote-border: #d0d7de;
+  --table-header-bg: #f6f8fa;
+  --selection-bg: rgba(9, 105, 218, 0.15);
+  --highlight-bg: #fff3bf;
+}
+
+body.theme-dark {
+  --bg-color: #0d1117;
+  --text-color: #e6edf3;
+  --text-secondary: #aab3bd;
+  --text-muted: #8b949e;
+  --border-color: #272d34;
+  --link-color: #58a6ff;
+  --code-bg: rgba(110, 118, 129, 0.3);
+  --code-block-bg: #161b22;
+  --blockquote-border: #30363d;
+  --table-header-bg: #161b22;
+  --selection-bg: rgba(88, 166, 255, 0.2);
+  --highlight-bg: rgba(210, 153, 34, 0.35);
+}
+
+body.theme-elegant {
+  --bg-color: #f0edea;
+  --text-color: #2c2c2c;
+  --text-secondary: #6c6c6c;
+  --text-muted: #777;
+  --border-color: #dedad5;
+  --link-color: #bc4424;
+  --code-bg: #e8e4df;
+  --code-block-bg: #2c2c2c;
+  --code-block-text: #e0dcd7;
+  --blockquote-border: #c44b2b;
+  --blockquote-bg: #eae6e1;
+  --table-header-bg: #eae6e1;
+  --table-border: #d8d3ce;
+  --selection-bg: rgba(196, 75, 43, 0.2);
+  --highlight-bg: #f0d9a8;
+}
+
+/* elegant 的正文排版（字体、加粗色、行内代码色、代码块字色、引用底色、表格线）
+   已搬到 themes/editor-preview.css：主题在那边只用覆盖 --md-* 变量和几条表格规则，
+   一处写完，不用每个主题在 base 里再分一段。 */
+
+/* Scrollbar: macOS keeps its native overlay bars, which are drawn while you
+   scroll, take no layout space and are absent the rest of the time. Only Windows
+   and Linux get the thin custom bar below. Chromium never repaints a custom
+   scrollbar on hover, so a "reveal the thumb on :hover" rule paints nothing
+   (verified on the tab bar and the editor): the honest options are the system
+   overlay bars or an always-on bar. */
+body.platform-non-mac *::-webkit-scrollbar,
+body.web-playground *::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+body.platform-non-mac *::-webkit-scrollbar-track,
+body.web-playground *::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+body.platform-non-mac *::-webkit-scrollbar-thumb,
+body.web-playground *::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 3px;
+}
+
+body.platform-non-mac *::-webkit-scrollbar-corner,
+body.web-playground *::-webkit-scrollbar-corner {
+  background: var(--bg-color);
+}
+
+/* ======= SEARCH PANEL ======= */
+
+.search-panel {
+  position: fixed;
+  /* Below the top row, like every other floating layer: the row is where the
+     window controls live (our own three buttons on macOS, the system's on
+     Windows), and a panel placed inside it ends up with its buttons sitting on
+     top of the find field (issue #112). */
+  top: calc(var(--chrome-row-height) + var(--tab-bar-height, 0px) + 8px);
+  right: 12px;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
+  grid-template-areas:
+    "query count prev next close"
+    "replace replace replace replace replace";
+  align-items: center;
+  column-gap: 4px;
+  row-gap: 6px;
+  width: 360px;
+  padding: 6px 8px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  -webkit-app-region: no-drag;
+}
+
+.search-input {
+  width: 180px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-size: 13px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--link-color);
+}
+
+.search-count {
+  min-width: 32px;
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 12px;
+  text-align: center;
+}
+
+.search-panel > .search-input { grid-area: query; min-width: 0; width: auto; }
+.search-panel > .search-count { grid-area: count; min-width: 32px; }
+.search-panel > .search-btn:nth-of-type(1) { grid-area: prev; }
+.search-panel > .search-btn:nth-of-type(2) { grid-area: next; }
+.search-panel > .search-btn.search-close { grid-area: close; }
+
+.search-replace-row {
+  grid-area: replace;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 4px;
+  padding: 0;
+}
+
+.search-replace-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-action {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 4px 7px;
+  background: none;
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.search-action:hover {
+  background: var(--code-bg);
+  color: var(--text-color);
+}
+
+.search-btn {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: none;
+  color: var(--text-color);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.search-btn:hover {
+  background: var(--code-bg);
+}
+
+.search-close {
+  font-size: 16px;
+}
+
+.search-match {
+  background: var(--search-match-bg);
+  border-radius: 2px;
+}
+
+.search-match-current {
+  background: var(--search-match-current-bg);
+  border-radius: 2px;
+}
+
+/* ======= MATH ======= */
+
+.math-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(2px);
+}
+
+.math-modal {
+  display: flex;
+  width: 480px;
+  max-width: 90vw;
+  padding: 20px;
+  flex-direction: column;
+  gap: 16px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+  -webkit-app-region: no-drag;
+}
+
+.math-modal h3 {
+  margin: 0;
+  color: var(--text-color);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.math-modal-input {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  resize: vertical;
+}
+
+.math-modal-input:focus {
+  border-color: var(--link-color);
+}
+
+.math-modal-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary, var(--text-muted));
+  font-size: 13px;
+}
+
+.math-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.math-modal-btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.math-modal-btn.cancel {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-color);
+}
+
+.math-modal-btn.cancel:hover {
+  background: var(--code-bg);
+}
+
+.math-modal-btn.save {
+  background: var(--link-color);
+  color: #fff;
+}
+
+/* --- Footnote hover preview (#25): definition in a floating card --- */
+.footnote-preview {
+  position: fixed;
+  z-index: 40;
+  max-width: 420px;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 10px 14px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(62, 53, 42, .14);
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.footnote-preview[hidden] {
+  display: none;
+}
+
+.math-modal-btn.save:hover {
+  opacity: 0.9;
+}
+
+/* Update banner (weak, non-blocking) */
+#update-banner {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px 9px 14px;
+  border-radius: 8px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  color: var(--text-color);
+  font-size: 13px;
+  z-index: 100;
+}
+
+#update-banner[hidden] {
+  display: none;
+}
+
+#update-banner-text {
+  white-space: nowrap;
+}
+
+#update-banner-action {
+  border: none;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--link-color);
+  color: #fff;
+}
+
+#update-banner-action:hover {
+  opacity: 0.9;
+}
+
+#update-banner-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#update-banner-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+#update-banner-dismiss:hover {
+  background: color-mix(in srgb, var(--text-color) 14%, transparent);
+  color: var(--text-color);
+}
+
+/* ===== Editor font preferences (#7752855) =====
+   User preference > theme > built-in defaults. Only the editor prose and the
+   source editor are overridden; code blocks keep the theme's code font. */
+/* 字体族和字号分开挂类：只调字号时不能带上字体族那条，否则空的 var(--editor-font) 会让
+   font-family 变成无效声明，主题自己的字体被顶掉（2026-10-06 报的）。 */
+body.has-custom-font #editor .cm-content {
+  font-family: var(--editor-font) !important;
+}
+
+body.has-custom-font-size #editor .cm-content {
+  font-size: var(--editor-font-size, 16px) !important;
+}
+
+body.has-custom-font #source-editor {
+  font-family: var(--editor-font) !important;
+}
+
+body.has-custom-font-size #source-editor {
+  font-size: var(--editor-font-size, 14px) !important;
+}
+
+/* Font settings modal (reuses math-modal shell) */
+.font-modal {
+  width: 440px;
+  gap: 14px;
+}
+
+.font-modal h3 {
+  font-size: 15px;
+}
+
+.font-modal-row {
+  display: flex;
+  gap: 10px;
+}
+
+.font-modal-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.font-modal-col-size {
+  flex: none;
+  width: 84px;
+}
+
+.font-modal-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.font-modal .math-modal-input {
+  font-family: inherit;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.font-modal .font-modal-size {
+  width: 100%;
+}
+
+.font-modal-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 10001;
+  max-height: 208px;
+  overflow-y: auto;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+}
+
+.font-modal-list-item {
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text-color);
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.font-modal-list-item:hover,
+.font-modal-list-item.active {
+  background: var(--code-bg);
+}
+
+.font-modal-preview {
+  padding: 12px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--code-bg);
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.font-modal-footer {
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.font-modal-footer-group {
+  display: flex;
+  gap: 10px;
+}
+
+/* ===== 放映幻灯片 (View → Play Slideshow) =====
+   `---` divides the document; the surface shows one division at a time and
+   nothing else. The page is made of the editor's own blocks (renderer/
+   slideshow.ts hides the stretches around it), so the theme's typography,
+   tables, formulas and diagrams come along unchanged. */
+body.presenting {
+  /* A pointer is noise over a slide, and every gesture the deck needs is either
+     a key or a plain click. */
+  cursor: none;
+}
+
+body.presenting #titlebar,
+body.presenting #file-panel,
+body.presenting #panel-resizer,
+body.presenting #source-editor,
+body.presenting #hover-tip,
+body.presenting #update-banner,
+body.presenting #editor .code-copy-btn,
+body.presenting #editor > .footnote-preview {
+  display: none !important;
+}
+
+/* The editor becomes the surface: the whole window, the theme's paper, no
+   chrome and no 780px column. Fixed, so it covers the row rather than starting
+   below it. */
+body.presenting #editor-region,
+body.paper #editor-region,
+body.slides-printing #editor-region {
+  width: 100% !important;
+  height: auto !important;
+  margin-left: 0 !important;
+}
+
+body.presenting #editor {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  height: auto;
+  padding: 0;
+  background: var(--bg-color);
+}
+
+/* 放映时滚动发生在 CM6 的 .cm-scroller 上，#editor 自己不动，所以这里要把
+   scroller 变成一个居中的容器。`safe center` 是关键：普通 center 会让超出窗口的页面
+   从上方溢出且滚不回去，safe 会在装不下时退回顶对齐。 */
+body.presenting #editor .cm-scroller {
+  display: flex !important;
+  align-items: safe center !important;
+  overflow: auto !important;
+}
+
+/* Centred by auto margins instead of justify-content: a page taller than the
+   window has to stay scrollable from its own first line, and centring inside a
+   flex container clips exactly that. */
+body.presenting #editor .cm-content {
+  flex: 0 0 auto;
+  margin: 0 auto;
+  max-width: min(38em, 86vw);
+  padding: 4vh 0;
+  font-size: var(--slide-font-size, 24px);
+  line-height: 1.6;
+  caret-color: transparent;
+}
+
+/* Content that does not fit gives way to the surface: a table scrolls inside the
+   page, a diagram or a photo shrinks to fit it. */
+body.presenting #editor .cm-content > * {
+  max-width: 100%;
+}
+
+body.presenting #editor .cm-content .cm-md-table-widget {
+  display: block;
+  overflow-x: auto;
+}
+
+body.presenting #editor .cm-content .cm-md-codeblock {
+  overflow-x: auto;
+}
+
+body.presenting #editor .cm-content img,
+body.presenting #editor .cm-content svg {
+  max-height: 72vh;
+}
+
+/* Print only document content; app overlays can appear at any time. */
+@media print {
+  body > :not(#editor-region),
+  #editor .code-copy-btn,
+  #editor > .footnote-preview {
+    display: none !important;
+  }
+}
+
+/* ─── ColaMD CT：图片询问弹窗 / 表格网格选择器 / 通知浮层 / 偏好设置 ──────── */
+
+/* Windows 标题栏的应用菜单（汉堡按钮）：主题化面板，替代原生灰菜单 */
+.colamd-menu {
+  position: fixed;
+  z-index: 5000;
+  min-width: 230px;
+  max-width: 300px;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+  color: var(--text-color);
+  font-size: 13px;
+  -webkit-app-region: no-drag;
+  animation: colamd-menu-in 0.12s ease-out;
+}
+
+@keyframes colamd-menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.colamd-menu-flyout {
+  min-width: 170px;
+}
+
+.colamd-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border-color);
+  opacity: 0.7;
+}
+
+.colamd-menu-section {
+  padding: 6px 10px 3px;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  opacity: 0.8;
+}
+
+.colamd-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.colamd-menu-item:hover,
+.colamd-menu-item:focus-visible {
+  background: color-mix(in srgb, var(--link-color) 12%, transparent);
+  outline: none;
+}
+
+.colamd-menu-item-primary {
+  margin-bottom: 2px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--link-color) 9%, transparent);
+  font-weight: 600;
+}
+
+.colamd-menu-item-primary:hover {
+  background: color-mix(in srgb, var(--link-color) 18%, transparent);
+}
+
+.colamd-menu-label {
+  flex: 1;
+}
+
+.colamd-menu-hint {
+  flex: none;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.colamd-menu-arrow {
+  flex: none;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 15px;
+  line-height: 1;
+}
+
+.colamd-menu-check {
+  flex: none;
+  color: var(--link-color);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.colamd-menu-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 图片信息卡（点击渲染出来的图片弹出） */
+.colamd-image-info {
+  position: fixed;
+  z-index: 9000;
+  min-width: 260px;
+  max-width: 420px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.18);
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+.colamd-image-info[hidden] {
+  display: none;
+}
+
+.colamd-image-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.colamd-image-info-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.colamd-image-info-close:hover {
+  color: var(--text-color);
+}
+
+.colamd-image-info-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.colamd-image-info-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.colamd-image-info-name {
+  flex: none;
+  width: 5em;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+}
+
+.colamd-image-info-value {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+
+.colamd-image-info-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.colamd-image-info-footer .math-modal-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.colamd-ask-modal {
+  width: 380px;
+}
+
+.colamd-ask-question {
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 14px;
+}
+
+.colamd-ask-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.colamd-ask-buttons .math-modal-btn {
+  padding: 10px 16px;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-color);
+  text-align: center;
+}
+
+.colamd-ask-buttons .math-modal-btn:hover:not(:disabled) {
+  border-color: var(--link-color);
+  color: var(--link-color);
+}
+
+.colamd-ask-buttons .math-modal-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.colamd-ask-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.colamd-ask-cancel {
+  align-self: center;
+  padding: 4px 14px !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-secondary, var(--text-muted, var(--text-color))) !important;
+  font-size: 13px !important;
+}
+
+.colamd-ask-cancel:hover {
+  text-decoration: underline;
+}
+
+.colamd-table-picker {
+  width: auto;
+  padding: 14px;
+  gap: 10px;
+  align-items: center;
+}
+
+.colamd-table-picker-label {
+  color: var(--text-color);
+  font-size: 14px;
+  font-weight: 600;
+  min-height: 20px;
+}
+
+.colamd-table-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 22px);
+  grid-auto-rows: 22px;
+  gap: 3px;
+}
+
+.colamd-table-picker-cell {
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.colamd-table-picker-cell.active {
+  background: var(--link-color);
+  border-color: var(--link-color);
+}
+
+.colamd-table-picker-hint {
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+}
+
+#colamd-ct-notice {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10001;
+  max-width: 70vw;
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16);
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+#colamd-ct-notice[hidden] {
+  display: none;
+}
+
+/* 偏好设置 */
+.colamd-pref-modal {
+  width: 560px;
+  max-height: 80vh;
+}
+
+.colamd-pref-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.colamd-pref-tab {
+  padding: 8px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.colamd-pref-tab.active {
+  color: var(--link-color);
+  border-bottom-color: var(--link-color);
+}
+
+.colamd-pref-body {
+  overflow-y: auto;
+  max-height: 55vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px;
+}
+
+.colamd-pref-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.colamd-pref-section-title {
+  color: var(--text-color);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.colamd-pref-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.colamd-pref-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.colamd-pref-row > label,
+.colamd-pref-label {
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+}
+
+.colamd-pref-select,
+.colamd-pref-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-color);
+  color: var(--text-color);
+  font-size: 13px;
+  outline: none;
+}
+
+.colamd-pref-select:focus,
+.colamd-pref-input:focus {
+  border-color: var(--link-color);
+}
+
+.colamd-pref-hint {
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.colamd-pref-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.colamd-pref-key-group {
+  color: var(--text-color);
+  font-size: 13px;
+  font-weight: 600;
+  padding-top: 6px;
+}
+
+.colamd-pref-key-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  color: var(--text-color);
+}
+
+.colamd-pref-key-name {
+  flex: 1;
+}
+
+.colamd-pref-key-binding {
+  min-width: 150px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--code-bg);
+  color: var(--text-color);
+  font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.colamd-pref-key-binding.capturing {
+  border-color: var(--link-color);
+  color: var(--link-color);
+}
+
+.colamd-pref-key-binding.conflict {
+  border-color: #e05c5c;
+  color: #e05c5c;
+}
+
+.colamd-pref-key-reset {
+  padding: 2px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.colamd-pref-key-reset:hover {
+  color: var(--link-color);
+}
+
+.colamd-pref-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+

@@ -1,0 +1,64 @@
+{
+  "name": "colamd-ct",
+  "version": "2.7.15",
+  "description": "ColaMD CT - ColaMD with Typora-grade image workflow, table editing and full keyboard shortcuts. Based on ColaMD (MIT) by marswave.ai.",
+  "main": "dist/main/index.js",
+  "author": {
+    "name": "marswave.ai",
+    "email": "hello@marswave.ai"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/marswaveai/colamd",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marswaveai/colamd.git"
+  },
+  "colamdct": {
+    "note": "Local Typora-enhanced build of ColaMD. Keeps the ColaMD UI; adds image upload, table editing and customizable shortcuts."
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "electron-vite build && electron-builder",
+    "dist:mac": "electron-vite build && electron-builder --mac",
+    "dist:win": "electron-vite build && electron-builder --win",
+    "dist:linux": "electron-vite build && electron-builder --linux",
+    "build:web": "vite build --config vite.web.config.ts",
+    "preview:web": "vite preview --config vite.web.config.ts",
+    "check:theme-colors": "node scripts/check-theme-colors.mjs",
+    "verify:markdown": "node scripts/verify-markdown.mjs",
+    "verify:links": "node scripts/verify-links.mjs",
+    "verify:features": "node scripts/verify-features.mjs",
+    "verify:list": "node scripts/verify-list-input.mjs",
+    "verify:scroll-render": "node scripts/verify-scroll-render.mjs",
+    "verify:source-mode": "node scripts/verify-source-mode.mjs",
+    "verify:image-export": "node scripts/verify-image-export.mjs",
+    "verify:export-pdf": "node scripts/verify-export-pdf.mjs",
+    "verify:themes": "node scripts/verify-themes.mjs",
+    "verify:docx": "node scripts/verify-docx.mjs",
+    "verify:table-ops": "node scripts/verify-table-ops.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language-data": "^6.5.2",
+    "@codemirror/search": "^6.7.2",
+    "@lezer/markdown": "^1.7.2",
+    "docx": "^9.7.1",
+    "electron-updater": "^6.8.9",
+    "katex": "^0.16.47",
+    "pele": "^1.6.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "unified": "^11.0.5"
+  },
+  "devDependencies": {
+    "@types/katex": "^0.16.8",
+    "electron": "^44.3.0",
+    "electron-builder": "^26.16.1",
+    "electron-vite": "^3.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

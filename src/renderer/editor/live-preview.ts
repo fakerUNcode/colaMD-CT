@@ -1,0 +1,1618 @@
+// Live preview 装饰层：把 markdown 源码画成所见即所得的样子。
+//
+// 硬规矩（见 docs/editor-architecture.md）：**装饰不许修改文档。**
+// 这里只做两件事：
+//   1. 给语法加样式（Decoration.mark / Decoration.line）——标记字符照旧在，只是被画得轻一些。
+//   2. 把光标不在其内的标记字符藏起来（Decoration.replace）——只是「看不见」，
+//      文本还在，保存时一个字节都不变。
+//
+// 「藏起来」的判据是光标位置：光标进入某个区间时，标记字符显形，用户可以就地编辑。
+// Obsidian 的 Live Preview 就是这个行为。
+//
+// 一个反复出现的形状：**渲染失败宁可退回源码，绝不吞掉用户的字。**
+// 公式渲不出来就显示 `$...$`，mermaid 画不出来就显示代码块。文件永远是安全的，
+// 装饰层再错也只是难看。
+//
+// 装饰装在 StateField 里、用 `provide` 暴露，**不能用 `EditorView.decorations.compute()`**。
+// 原因不是风格问题：CodeMirror 把「函数式提供的装饰」标记为动态，而动态装饰
+// **不许跨行替换**，命中就抛 `RangeError: Decorations that replace line breaks may not
+// be specified via plugins`（node_modules/@codemirror/view/dist/index.cjs:2780）。
+// 块公式、属性区、mermaid、表格都是跨行替换，用 compute 提供会让整层装饰更新中途抛错，
+// 表现为「整个界面错乱」。StateField + provide 提供的是装饰集本身，不是函数，
+// 跨行替换与块级 widget 才被允许。
+
+import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from '@codemirror/view'
+import { EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from '@codemirror/state'
+import { forceParsing, syntaxTree } from '@codemirror/language'
+import type { SyntaxNode, SyntaxNodeRef } from '@lezer/common'
+import katex from 'katex'
+import { scanMath, excludedRanges, frontmatterRange, type Excluded, type MathRange } from './math-scan'
+import { renderMermaid, attachDiagramZoom, detachDiagramZoom, isDiagramZoomed } from './mermaid-bridge'
+import { sanitizeHTML, cleanStyle } from './html-sanitize'
+import { footnoteDefinitions, footnoteNumbers, FOOTNOTE_REF_RE } from './footnotes'
+import { isChinese } from '../ui-language'
+import { attachColumnResize, applyPendingCellFocus } from './table-ops'
+
+/** 给区间加样式类，不隐藏任何字符。 */
+const MARK = Decoration.mark.bind(Decoration)
+/**
+ * 块级元素用行装饰。
+ *
+ * 为什么不能用 `MARK`：`Decoration.mark` 只包住它范围内的文字，一个跨多行的区间
+ * 会被拆成好几段文字盒子，而 CM6 里真正撑满正文宽度的是 `.cm-line`。
+ * 用 mark 包表格，表格宽度就由文字长度决定（实测被压到 90px，应为 880px）。
+ */
+const BLOCK = (className: string) => Decoration.line({ class: className })
+/** 把一个跳行区间展开成逐行的行装饰。 */
+function pushBlockLines(
+  state: EditorState,
+  from: number,
+  to: number,
+  className: string,
+  ranges: DecorationRange[],
+): void {
+  const first = state.doc.lineAt(from).number
+  const last = state.doc.lineAt(to).number
+  for (let n = first; n <= last; n++) {
+    const lineFrom = state.doc.line(n).from
+    ranges.push({ from: lineFrom, to: lineFrom, deco: BLOCK(className) })
+  }
+}
+/**
+ * 列表项：只给它**自己那一行**加类，不给它子列表里的行加。
+ *
+ * 一个 ListItem 的区间包含它下面的子列表，按区间铺类的话，嵌套项那一行会同时拿到
+ * 外层和内层的类（实测一行上同时挂着 `cm-md-li-0` 和 `cm-md-li-1`），缩进只是靠 CSS
+ * 里规则的前后顺序才侥幸对。所以每一行都要问一次语法树：包住这一行的**最内层**
+ * ListItem 是不是我自己。
+ */
+const QUOTE_PREFIX_RE = /^(?:[ \t]*> ?)+/
+
+function hasListSpace(state: EditorState, markTo: number): boolean {
+  const ch = markTo < state.doc.length ? state.doc.sliceString(markTo, markTo + 1) : ''
+  return ch === ' ' || ch === '\t'
+}
+
+function pushListItemLines(state: EditorState, node: SyntaxNode, ranges: DecorationRange[]): void {
+  const selfMark = node.getChild('ListMark')
+  // 孤立一个 `-` 或 `1.`（后面还没敲空格）不算成型的列表项，等空格落下再缩进。
+  if (!selfMark || !hasListSpace(state, selfMark.to)) return
+  const className = `cm-md-li cm-md-li-${Math.min(listDepth(node), 6)}`
+  const tree = syntaxTree(state)
+  // 行没有 li 外壳，续行也没有 ListMark。把语法树里已有的归属带到导出层，
+  // 表格、空行与父项续文才不会被误认成另一项；这里只记录位置，不另存内容。
+  const path: { list: number; item: number; start?: number }[] = []
+  let quoted = false
+  for (let ancestor: SyntaxNode | null = node; ancestor; ancestor = ancestor.parent) {
+    if (ancestor.name === 'Blockquote') quoted = true
+    if (ancestor.name !== 'ListItem') continue
+    const list = ancestor.parent!
+    const mark = ancestor.getChild('ListMark')
+    const start = list.name === 'OrderedList' && mark ? Number.parseInt(state.sliceDoc(mark.from, mark.to), 10) : undefined
+    path.unshift({ list: list.from, item: ancestor.from, ...(start === undefined ? {} : { start }) })
+  }
+  const attributes = { 'data-list-path': JSON.stringify(path), 'data-list-quoted': String(quoted) }
+  const paragraphs = node.getChildren('Paragraph')
+
+  // 子列表之前的行一定是这一项自己的（包括项里的空行），不用问语法树。
+  let ownEnd = node.to
+  for (let child = node.firstChild; child; child = child.nextSibling) {
+    if (child.name === 'BulletList' || child.name === 'OrderedList') {
+      ownEnd = child.from
+      break
+    }
+  }
+
+  const first = state.doc.lineAt(node.from).number
+  const ownLast = state.doc.lineAt(node.to).number
+  // 同一列表的相邻项目间空行属于分隔，不让导出把一张列表截成两张。
+  const last = node.nextSibling?.name === 'ListItem' ? state.doc.lineAt(node.nextSibling.from).number - 1 : ownLast
+  for (let n = first; n <= last; n++) {
+    const line = state.doc.line(n)
+    if (n > first && n <= ownLast && line.to <= ownEnd) {
+      // 用户在空列表项按回车退出列表后直接顶格打字，CommonMark 仍把无缩进的下一行算作懒续行；
+      // 没有缩进的非空行已经退出列表，不该继续挂列表缩进和归属。
+      const body = line.text.replace(QUOTE_PREFIX_RE, '')
+      if (body.trim() !== '' && !/^[ \t]/.test(body)) break
+    }
+    if (n <= ownLast && line.to > ownEnd) {
+      // 子列表里的行：问语法树，包住这一行的**最内层** ListItem 得是我自己。
+      // 位置取行内第一个非空白字符（跳过引用前缀与缩进）——从行首问会问到外层那一项。
+      const quoteLen = QUOTE_PREFIX_RE.exec(line.text)?.[0].length ?? 0
+      const indent = /^[ \t]*/.exec(line.text.slice(quoteLen))?.[0].length ?? 0
+      const at = Math.min(line.from + quoteLen + indent, line.to)
+      let owner: SyntaxNode | null = tree.resolveInner(at, 1)
+      while (owner && owner.name !== 'ListItem') owner = owner.parent
+      if (!owner || owner.from !== node.from) continue
+      const body = line.text.slice(quoteLen)
+      if (body.trim() !== '' && !/^[ \t]/.test(body)) break
+    }
+    const paragraph = paragraphs.find(block => block.from <= line.to && block.to > line.from)
+    ranges.push({ from: line.from, to: line.from, deco: Decoration.line({ class: className, attributes: {
+      ...attributes,
+      ...(paragraph ? { 'data-list-paragraph': String(paragraph.from) } : {}),
+    } }) })
+  }
+}
+
+/** 把区间藏起来（只是看不见，文本还在）。 */
+const hide = (from: number, to: number) => Decoration.replace({})
+
+/**
+ * 藏掉一个标记字符，**连同它后面那个空格**。
+ *
+ * markdown 的标记（`#`、`>`）与正文之间那个空格不属于标记节点，只藏标记的话，
+ * 标题与引用的文字会比正文右移一个字：`# 标题` 藏掉 `#` 剩下 ` 标题`。
+ * 这个偏移很小，但正是「前置对齐不对」的全部来源。
+ */
+function hideMarker(state: EditorState, from: number, to: number, ranges: DecorationRange[], visible = false): void {
+  const next = to < state.doc.length ? state.doc.sliceString(to, to + 1) : ''
+  // 空格不可能是换行，所以 to + 1 不会越到下一行
+  const end = next === ' ' || next === '\t' ? to + 1 : to
+  // 光标在这一行时标记要露出来（这是「当前行看源码」的手感），但它不属于正文。
+  // 给它一个类名，复制和导出才认得出它并丢掉：2026-09-26 发现，在一行里选一段带加粗的
+  // 文字，纯文本里带着 `**`，因为标记只在光标离开这一行时才从 DOM 里消失。
+  ranges.push({ from, to: end, deco: visible ? MARK({ class: 'cm-md-marker' }) : hide(from, end) })
+}
+
+interface DecorationRange {
+  from: number
+  to: number
+  deco: Decoration
+}
+
+/** 一个区间（属性区）。 */
+interface Range {
+  from: number
+  to: number
+}
+
+/** 位置是否落在某个区间内。区间为 null 时永远不命中。 */
+function inRange(range: Range | null, pos: number): boolean {
+  return !!range && pos >= range.from && pos < range.to
+}
+
+/**
+ * 遍历语法树，跳过属性区。
+ *
+ * 属性区里是 YAML，不是 markdown：`- `、`---`、`**`、`#` 在那里都只是普通字符。
+ * 解析器不认 YAML，会把它们解析成列表项、分隔线、加粗，所以在这里统一挡掉，
+ * 而不是让每个收集器各写一遍判断。
+ *
+ * `Document` 不能跳过：它的起点就是属性区的起点，跳过它整棵树都不用看了。
+ */
+function iterateContent(
+  state: EditorState,
+  front: Range | null,
+  enter: (node: SyntaxNodeRef) => boolean | void,
+): void {
+  syntaxTree(state).iterate({
+    enter: (node) => {
+      if (front && node.name !== 'Document' && inRange(front, node.from)) return false
+      return enter(node)
+    },
+  })
+}
+
+/**
+ * 编辑器当前是否有焦点。
+ *
+ * 「光标所在行显示源码」是给**正在编辑**的那一行用的。但打开文件时 CodeMirror 的默认光标
+ * 就在第 0 位，于是第一行会一直显示 `# **标题**` 这样的源码：用户没点过它，看起来就是个
+ * bug（2026-09-26 报的）。所以判据里加上焦点：没有焦点，就没有「正在编辑」的那一行。
+ */
+export const setEditorFocus = StateEffect.define<boolean>()
+
+export const editorFocusField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setEditorFocus)) return effect.value
+    }
+    return value
+  },
+})
+
+function editorFocused(state: EditorState): boolean {
+  return state.field(editorFocusField, false) ?? false
+}
+
+/**
+ * 导出时的「干净」开关。
+ *
+ * 导出的是一篇文档，不是编辑器此刻的样子：正在编辑的那一行显形的源码、
+ * 光标、选区都不该跟着进 PDF。导出前把它打开，导出后关掉。
+ */
+/**
+ * 文档自己的 `file://` URL。
+ *
+ * 文件里写的是 `![](img/a.png)` 这样的**相对**路径——那是用户文件里真实存在的一串字，
+ * 不许改（改了就等于保存时动用户的文件）。但浏览器要的是一个能加载的绝对地址，
+ * 所以解析放在画图这一刻做，用文档自己的 URL 当基准。
+ *
+ * 值同时留在模块变量里：换文件会重建整个 EditorState，field 会被 create 重置，
+ * 只有模块变量能跨过去。
+ */
+let documentFileUrl: string | null = null
+
+/** 编辑器还没建起来时也要能先记下基准，否则第一张图会按空基准解析。 */
+export function primeDocumentFileUrl(url: string | null): void {
+  documentFileUrl = url
+}
+
+/**
+ * 异步画出来的东西（图、公式）会改变块级 widget 的高度，而这个高度是 CodeMirror 在
+ * 渲染那一刻量过就记住的。它变高之后，下面每一行屏幕上所在的位置都比 CodeMirror 记的
+ * 低，鼠标点正文时光标就落到下一行（#199 里那张图那一条）。画完让编辑器重新量一次。
+ *
+ * widget 拿不到 view（WidgetType 没有这个入口），所以创建 view 的时候记一份在这里。
+ */
+let measureHost: EditorView | null = null
+
+export function setMeasureHost(view: EditorView | null): void {
+  measureHost = view
+}
+
+function remeasureAfterDraw(): void {
+  if (!measureHost) return
+  const view = measureHost
+  try {
+    // 只喊 requestMeasure 不管用：CodeMirror 判断「内容要不要重新量」看的是内容元素
+    // 自己的高度变没变，而 `.cm-content` 带着它自带的 `min-height: 100%`，永远至少
+    // 一屏高，里面的块长高了它也不变。量之前先把这个下限撤掉，高度差异就露出来了；
+    // 量完（write 阶段）放回去，屏幕上什么也看不见。
+    const dom = view.contentDOM
+    dom.style.minHeight = '0'
+    view.requestMeasure({
+      read: () => null,
+      write: () => {
+        dom.style.minHeight = ''
+      },
+    })
+  } catch {
+    // view 已经销毁了就什么也不用做
+  }
+}
+
+export const setDocumentFileUrlEffect = StateEffect.define<string | null>()
+
+export const documentFileUrlField = StateField.define<string | null>({
+  create: () => documentFileUrl,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setDocumentFileUrlEffect)) {
+        documentFileUrl = effect.value
+        return effect.value
+      }
+    }
+    return value
+  },
+})
+
+/** 把文件里的图片地址解析成浏览器能加载的地址。 */
+function resolveImageSrc(raw: string, base: string | null): string {
+  const value = raw.trim().replace(/^<|>$/g, '')
+  if (/^(?:https?:|file:|data:|blob:)/i.test(value)) return value
+  if (!base) return value
+  try {
+    return new URL(value.replaceAll('\\', '/'), base).href
+  } catch {
+    return value
+  }
+}
+
+/** `![alt](src)` / `![alt](<src> "title")`。解析不了就返回 null，退回源码。 */
+function parseImage(source: string): { alt: string; src: string } | null {
+  const match = /^!\[([^\]]*)\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)$/.exec(source.trim())
+  if (!match) return null
+  return { alt: match[1], src: match[2] }
+}
+
+/**
+ * 图片。
+ *
+ * 加载不出来就把源码原样放回去——和公式、mermaid 一样的规矩：宁可难看，不吞用户的字。
+ * 点击图片不需要额外处理：光标落进这一行，这一行就退回源码，路径可以直接改。
+ */
+/**
+ * 被替换掉的块都在自己身上带着「我在文档里的哪一段」。
+ *
+ * 点一下它就要能回到源码里改（#138：换内核之后表格、图、图片点进去没反应，而 2.6 是
+ * 可以改的）。公式从第一天就是这么做的，这里把同一件事推广到每个替换块，
+ * 由 editor.ts 里一个统一的点击处理器收尾。
+ */
+function withSourceRange<T extends HTMLElement>(el: T, from: number, to: number): T {
+  el.dataset.sourceFrom = String(from)
+  el.dataset.sourceTo = String(to)
+  return el
+}
+
+class ImageWidget extends WidgetType {
+  constructor(
+    readonly src: string,
+    readonly alt: string,
+    readonly source: string,
+    readonly from: number,
+    readonly to: number,
+  ) {
+    super()
+  }
+
+  eq(other: ImageWidget): boolean {
+    return other.src === this.src && other.alt === this.alt && other.from === this.from && other.to === this.to
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement('span')
+    wrap.className = 'cm-md-image'
+    withSourceRange(wrap, this.from, this.to)
+    const img = document.createElement('img')
+    img.src = this.src
+    img.alt = this.alt
+    img.addEventListener('load', () => {
+      remeasureAfterDraw()
+    })
+    img.addEventListener('error', () => {
+      wrap.classList.add('cm-md-image-failed')
+      wrap.textContent = this.source
+      remeasureAfterDraw()
+    })
+    wrap.appendChild(img)
+    return wrap
+  }
+}
+
+export const setCleanExport = StateEffect.define<boolean>()
+
+export const cleanExportField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setCleanExport)) return effect.value
+    }
+    return value
+  },
+})
+
+function exportingCleanly(state: EditorState): boolean {
+  return state.field(cleanExportField, false) ?? false
+}
+
+/**
+ * 判断某个位置是否落在光标/选区所在的行上。
+ * 判断粒度是「行」而不是「精确区间」：光标所在的这一行，标记全部显形，
+ * 这样用户点一下就能看到并修改原始语法，不需要精确点到标记上。
+ */
+/**
+ * 什么时候把标记的源码露出来：**永远不露**。
+ *
+ * 曾经是「光标所在的那一行露源码，方便改标记」（2026-09-26 定的）。2026-10-06 取消：
+ * 渲染模式就该是一篇干净的排版，要改标记直接去源码模式（⌘/）。两个函数留着，是因为
+ * 十来处调用点表达的都是同一件事，改判据只需要动这里。
+ */
+function isActiveLine(_state: EditorState, _pos: number): boolean {
+  return false
+}
+
+/** 行内的替换区间（链接地址、图片源码）不在露源码之列：那些文字本来就在眼前。 */
+function isActiveRange(_state: EditorState, _from: number, _to: number): boolean {
+  return false
+}
+
+/**
+ * 块级 widget（表格、图、HTML 块、块公式）的判据：光标落进块里就露源码。
+ *
+ * 这些块是把**整段源码**替换成渲染结果的，光标一落进去，打出来的字写进的是被盖住的
+ * 源码。所以光标进块时把源码露出来，点走再渲染回去。Obsidian 对表格就是这么做的，
+ * 也是 2026-10-15 对 #153 的裁定。
+ *
+ * 行内的标记不在此列（2026-10-06 定）：光标所在的行不再整行露源码，要改标记去源码模式。
+ * 两端都算在内：点表格落在源码第一行开头，那是块的起点，也算「在里面」。
+ */
+function isBlockActive(state: EditorState, from: number, to: number): boolean {
+  const sel = state.selection.main
+  return sel.from >= from && sel.to <= to
+}
+
+// ─── 公式 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 画一个公式。
+ *
+ * 两个调用点：正文里的 MathWidget，和表格单元格里的行内公式。表格是整块替换渲染的，
+ * 格子里的文字挂不上 CodeMirror 的装饰层，只能在拼 DOM 的时候自己画。
+ *
+ * 渲染失败时把源码原样放回去（`cm-md-math-error`），宁可难看也不丢字。
+ */
+function mathElement(code: string, block: boolean): HTMLElement {
+  const el = document.createElement(block ? 'div' : 'span')
+  el.className = block ? 'cm-md-math cm-md-math-block' : 'cm-md-math cm-md-math-inline'
+  try {
+    el.innerHTML = katex.renderToString(code, {
+      displayMode: block,
+      throwOnError: true,
+      // 公式里可能带用户写的 HTML，KaTeX 的 trust 默认关闭，保持关闭
+      trust: false,
+    })
+  } catch {
+    el.textContent = (block ? '$$' : '$') + code + (block ? '$$' : '$')
+    el.classList.add('cm-md-math-error')
+  }
+  return el
+}
+
+/**
+ * 公式渲染。判定交给 math-scan.ts（照 Obsidian 的保守规则），这里只负责画。
+ *
+ * 行内公式用 Widget 覆盖原文，而不是把 `$x$` 藏起来再插一段渲染结果：
+ * 两者视觉相同，覆盖的写法不必分别处理两个定界符的位置。
+ *
+ * 光标所在行照旧退回原文，用户可以就地改。渲染失败时显示 `$...$` 源码。
+ *
+ * widget 上带着源码区间（见 `withSourceRange`）：点它要能就地编辑，
+ * 而 DOM 里除了这里没有别的地方知道这段公式在缓冲区里的位置。
+ */
+class MathWidget extends WidgetType {
+  constructor(
+    readonly code: string,
+    readonly block: boolean,
+    readonly from: number,
+    readonly to: number,
+  ) {
+    super()
+  }
+
+  eq(other: MathWidget): boolean {
+    return other.code === this.code && other.block === this.block && other.from === this.from && other.to === this.to
+  }
+
+  toDOM(): HTMLElement {
+    return withSourceRange(mathElement(this.code, this.block), this.from, this.to)
+  }
+}
+
+/**
+ * 无序列表的圆点。
+ *
+ * CM6 里没有 `ul`/`li` 元素，`-` 只是一段普通文字，圆点得自己画。
+ * 有序列表的序号不画：它是文件里的字，屏幕上就该是那个字（增删列表项时由
+ * list-renumber.ts 把序号写回文件，不是靠画出来的假数字）。
+ */
+class ListBulletWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.className = 'cm-md-li-bullet'
+    span.textContent = '•'
+    return span
+  }
+}
+
+/** 数一个列表项的嵌套深度（往上数几层 ListItem）。 */
+function listDepth(node: SyntaxNode): number {
+  let depth = 0
+  let cur: SyntaxNode | null = node.parent
+  while (cur) {
+    if (cur.name === 'ListItem') depth++
+    cur = cur.parent
+  }
+  return depth
+}
+
+/** 扫描公式并压入装饰。 */
+function collectMath(
+  state: EditorState,
+  text: string,
+  excluded: Excluded[],
+  ranges: DecorationRange[],
+  zones: ActiveZone[],
+): void {
+  for (const range of scanMath(text, excluded)) {
+    if (range.block) zones.push({ from: range.from, to: range.to, kind: 'block' })
+    // 块公式：光标落进去就退回源码，就地改（行内公式的判据见上，保持不露）
+    if (isActiveLine(state, range.from) || (range.block && isBlockActive(state, range.from, range.to))) {
+      const delim = range.block ? 2 : 1
+      ranges.push({ from: range.from, to: range.from + delim, deco: MARK({ class: 'cm-md-marker' }) })
+      ranges.push({ from: range.to - delim, to: range.to, deco: MARK({ class: 'cm-md-marker' }) })
+      continue
+    }
+    ranges.push({
+      from: range.from,
+      to: range.to,
+      deco: Decoration.replace({ widget: new MathWidget(range.code, range.block, range.from, range.to) }),
+    })
+  }
+}
+
+// ─── 高亮 `==文字==` ─────────────────────────────────────────────────────────
+//
+// 这是本站自己的语法（milkdown 时代由 highlight.ts 定义）。文本优先之后它只需要
+// 一条装饰：把 `==` 藏起来、给中间加个底色。没有节点要建，也没有规则要注册。
+
+/** `==高亮==` 的匹配。不吃跨行，也不吃空的 `====`。 */
+const HIGHLIGHT_RE = /(?<![=])==(?!=)([^=\n]+?)==(?!=)/g
+
+function collectHighlight(state: EditorState, text: string, ranges: DecorationRange[], excluded: Excluded[]): void {
+  const inExcluded = (pos: number) => excluded.some((e) => pos >= e.from && pos < e.to)
+
+  HIGHLIGHT_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = HIGHLIGHT_RE.exec(text)) !== null) {
+    const start = match.index
+    const end = start + match[0].length
+    if (inExcluded(start)) continue
+    const active = isActiveLine(state, start)
+    // 藏定界符，给中间那段加底色；光标在这一行时定界符露出来，但仍要能认出来
+    const delimiter = (from: number, to: number) =>
+      active ? MARK({ class: 'cm-md-marker' }) : hide(from, to)
+    ranges.push({ from: start, to: start + 2, deco: delimiter(start, start + 2) })
+    ranges.push({ from: end - 2, to: end, deco: delimiter(end - 2, end) })
+    ranges.push({ from: start + 2, to: end - 2, deco: MARK({ class: 'cm-md-highlight' }) })
+  }
+}
+
+// ─── 任务列表的复选框 ────────────────────────────────────────────────────────
+
+/**
+ * `- [ ]` / `- [x]` 的方括号画成真的复选框。
+ *
+ * 这里只是「画」：点击行为在 editor.ts 里，它改写源码里的那一个字符。
+ * 也就是说勾选是**一次真的文本编辑**，可撤销、可保存，不是藏在某棵树里的状态。
+ */
+class TaskCheckboxWidget extends WidgetType {
+  constructor(readonly checked: boolean) {
+    super()
+  }
+
+  eq(other: TaskCheckboxWidget): boolean {
+    return other.checked === this.checked
+  }
+
+  toDOM(): HTMLElement {
+    const box = document.createElement('span')
+    box.className = this.checked ? 'cm-md-task cm-md-task-checked' : 'cm-md-task'
+    box.textContent = this.checked ? '☑' : '☐'
+    return box
+  }
+}
+
+function collectTaskItems(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  iterateContent(state, front, (node) => {
+      if (node.name !== 'TaskMarker') return
+      // 复选框**始终**画成复选框，光标停在那一行也一样（#136）。
+      // 别的标记在这一行会退回源码，好让人能改到标记本身；复选框不需要这样：
+      // 勾没勾是点出来的，而 `- [ ]` 这几个字符没人会手敲，退回源码只是多一步。
+      const raw = state.doc.sliceString(node.from, node.to)
+      const checked = /x/i.test(raw)
+      ranges.push({
+        from: node.from,
+        to: node.to,
+        deco: Decoration.replace({ widget: new TaskCheckboxWidget(checked) }),
+      })
+  })
+}
+
+// ─── Mermaid 图 ──────────────────────────────────────────────────────────────
+
+/**
+ * ```mermaid 代码块画成图。
+ *
+ * 渲染是异步的（引擎要懒加载），所以先放一个占位，画好了再原地替换。
+ * 失败就把代码块原样留着——图是锦上添花，代码是用户写的东西。
+ */
+class MermaidWidget extends WidgetType {
+  constructor(readonly code: string, readonly key: string, readonly from: number, readonly to: number) {
+    super()
+  }
+
+  eq(other: MermaidWidget): boolean {
+    return other.key === this.key && other.from === this.from && other.to === this.to
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement('div')
+    wrap.className = 'cm-md-mermaid'
+    withSourceRange(wrap, this.from, this.to)
+    wrap.textContent = isChinese() ? '图表渲染中…' : 'Rendering diagram…'
+
+    // **不指定**配色：图是画在代码块底色上的，颜色由 `--pele-*` 那组变量从主题推出来
+    // （themes/editor-preview.css 的 `.cm-md-mermaid`），换主题不用重画。
+    // 这里曾经按应用主题挑明暗两套调色板，可 elegant 和 bear 是浅色主题配深色代码块，
+    // 于是深底上画出了浅色主题的图：连线 #333 落在 #2c2c2c 上，边缘文字几乎看不见
+    // （2026-09-26 用户报的「线条和背景色太接近」）。现在没有「挑一套」这回事了。
+    void renderMermaid(this.code)
+      .then((svg) => {
+        wrap.innerHTML = svg
+        wrap.classList.add('cm-md-mermaid-ready')
+        // 画不下的图（被 max-width 压窄了）才真出得来控件（#129）
+        attachDiagramZoom(wrap)
+        // 图比占位高，块高变了：不重新量，下面几行的坐标就全偏（#199）
+        remeasureAfterDraw()
+      })
+      .catch(() => {
+        // 画不出来就退回代码块，绝不吞掉用户的图
+        wrap.textContent = '```mermaid\n' + this.code + '\n```'
+        wrap.classList.add('cm-md-mermaid-failed')
+        remeasureAfterDraw()
+      })
+    return wrap
+  }
+
+  destroy(dom: HTMLElement): void {
+    detachDiagramZoom(dom)
+  }
+
+  ignoreEvent(event: Event): boolean {
+    if (!POINTER_EVENTS.has(event.type)) return false
+    const target = event.target
+    if (!(target instanceof Element)) return false
+    // 控件上的事不给编辑器管：否则 mousedown 一落，CM 就把光标放到块里，块退回源码、图当场
+    // 没了（另有一条「点渲染块跳源码」在 editor.ts，那边按控件和放大态各挡一道）。
+    if (target.closest('.pele-zoom')) return true
+    // 放大之后按住拖是在挪图，不是在选字
+    const host = target.closest<HTMLElement>('.cm-md-mermaid')
+    return !!host && isDiagramZoomed(host)
+  }
+}
+
+// 编辑器管的事件里，只有指针那一小拨需要抢：滚轮、滚动、键盘都照旧归编辑器。
+const POINTER_EVENTS = new Set([
+  'mousedown',
+  'mouseup',
+  'click',
+  'dblclick',
+  'pointerdown',
+  'pointerup',
+  'touchstart',
+  'touchend',
+])
+
+function collectMermaid(
+  state: EditorState,
+  text: string,
+  ranges: DecorationRange[],
+  front: Range | null,
+  zones: ActiveZone[],
+): void {
+  iterateContent(state, front, (node) => {
+      if (node.name !== 'FencedCode') return
+      // 第一行是 ```mermaid 才画
+      const firstLineEnd = text.indexOf('\n', node.from)
+      if (firstLineEnd === -1) return
+      const opening = text.slice(node.from, firstLineEnd).trim()
+      if (!/^(`{3,}|~{3,})\s*mermaid\s*$/.test(opening)) return
+      // 去掉开头的 ```mermaid 行与结尾的 ```
+      const bodyStart = firstLineEnd + 1
+      const lastLineStart = text.lastIndexOf('\n', node.to - 1)
+      const code = text.slice(bodyStart, lastLineStart === -1 ? node.to : lastLineStart)
+      if (!code.trim()) return
+      zones.push({ from: node.from, to: node.to, kind: 'block' })
+      if (isBlockActive(state, node.from, node.to)) return
+      ranges.push({
+        from: node.from,
+        to: node.to,
+        deco: Decoration.replace({ widget: new MermaidWidget(code, `${node.from}:${code.length}`, node.from, node.to) }),
+      })
+  })
+}
+
+// ─── 属性区（YAML frontmatter）─────────────────────────────────────────────────
+//
+// 属性区是笔记开头的 metadata。它**必须留在缓冲区里**（见 #109：拆出去单独保管、
+// 保存时再拼回来的做法曾经把用户的 YAML 改写成非法内容），但它不该在阅读时占地方。
+//
+// 展示上做一件事：**收起来**。光标落在里面（准备改它）时才露出来，和「只有光标所在
+// 行露源码」是同一条规则。2026-09-26 一度改成压淡显示，结果 #138 报上来：从 2.6 升
+// 上来的人第一眼就看到文首多出几行 YAML，而它本来不在「所见即所得」的范围里。
+// 不折叠、不画成卡片、不换成一个「属性区」按钮：那些都是拿凭空造出来的控件替掉用户
+// 文件里真实存在的内容。收起时不画任何东西，布局上就像它不在。
+function collectFrontmatter(
+  state: EditorState,
+  ranges: DecorationRange[],
+  front: Range | null,
+  zones: ActiveZone[],
+): void {
+  if (!front) return
+  zones.push({ from: front.from, to: front.to, kind: 'frontmatter' })
+  // 光标在里面就露。这里不看焦点：光标停在一个被收起来的块里而窗口没有焦点时，
+  // 下一句敲进去的字会落在看不见的地方。
+  const editing = state.selection.ranges.some(
+    (range) => range.empty && range.head >= front.from && range.head <= front.to
+  )
+  if (editing) {
+    pushBlockLines(state, front.from, front.to, 'cm-md-frontmatter', ranges)
+    return
+  }
+  ranges.push({ from: front.from, to: front.to, deco: Decoration.replace({}) })
+  // 被替换掉的那几行会留下一行空行占着位置，顶上就会多出一条空白（2.6 没有）。
+  // 这一行本来就是个空壳，直接压成零高。
+  const firstLine = state.doc.lineAt(front.from)
+  ranges.push({ from: firstLine.from, to: firstLine.from, deco: Decoration.line({ class: 'cm-md-frontmatter-folded' }) })
+}
+
+// ─── 表格 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 表格画成真的 `<table>`。
+ *
+ * 为什么这里不像别的块一样「只加样式」：markdown 表格的单元格在源码里只是被 `|`
+ * 隔开的文字，行是一个个独立的 div，**没有任何办法给单元格画边框、做对齐**。
+ * 只加底色的结果是几条彩色横条，不是表格。Obsidian 与 Typora 都是把表格渲染成真表格，
+ * 光标进去才回到源码，这里照做。
+ *
+ * 光标落在表格的任意一行里时退回源码，所以改表格仍然是改文字。
+ */
+class TableWidget extends WidgetType {
+  constructor(readonly source: string, readonly base: string | null, readonly from: number, readonly to: number) {
+    super()
+  }
+
+  eq(other: TableWidget): boolean {
+    return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to
+  }
+
+  toDOM(): HTMLElement {
+    const rows = parseTable(this.source)
+    const table = document.createElement('table')
+    table.className = 'cm-md-table-widget'
+    withSourceRange(table, this.from, this.to)
+    if (rows.length === 0) {
+      table.textContent = this.source
+      return table
+    }
+    const [head, , ...body] = rows
+    const thead = document.createElement('thead')
+    const headRow = document.createElement('tr')
+    head.forEach((cell, index) => {
+      const th = document.createElement('th')
+      th.style.textAlign = alignOf(rows[1]?.[index] ?? '')
+      appendInline(th, cell, this.base)
+      headRow.appendChild(th)
+    })
+    thead.appendChild(headRow)
+    table.appendChild(thead)
+    const tbody = document.createElement('tbody')
+    for (const row of body) {
+      const tr = document.createElement('tr')
+      for (let i = 0; i < head.length; i++) {
+        const td = document.createElement('td')
+        td.style.textAlign = alignOf(rows[1]?.[i] ?? '')
+        appendInline(td, row[i] ?? '', this.base)
+        tr.appendChild(td)
+      }
+      tbody.appendChild(tr)
+    }
+    table.appendChild(tbody)
+    // ColaMD CT：colgroup 列宽 + 表头拖拽把手（见 table-ops.ts）
+    attachColumnResize(table, this.source)
+    // ColaMD CT：单元格编辑链上的下一格焦点（Tab/Enter 提交重建后接上）
+    applyPendingCellFocus(table)
+    return table
+  }
+}
+
+/** 按行拆表格源码，行内按未转义的 `|` 拆单元格。 */
+function parseTable(source: string): string[][] {
+  return source
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => {
+      const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+      const cells: string[] = []
+      let current = ''
+      for (let i = 0; i < trimmed.length; i++) {
+        const char = trimmed[i]
+        if (char === '\\' && trimmed[i + 1] === '|') {
+          current += '|'
+          i++
+          continue
+        }
+        if (char === '|') {
+          cells.push(current.trim())
+          current = ''
+          continue
+        }
+        current += char
+      }
+      cells.push(current.trim())
+      return cells
+    })
+}
+
+/** 分隔行里的对齐标记：`:---` 左、`:---:` 居中、`---:` 右。 */
+function alignOf(delimiter: string): string {
+  const cell = delimiter.trim()
+  const left = cell.startsWith(':')
+  const right = cell.endsWith(':')
+  if (left && right) return 'center'
+  if (right) return 'right'
+  return 'left'
+}
+
+/**
+ * 单元格里的行内内容。
+ *
+ * 用 DOM 拼，不拼 innerHTML：单元格内容来自用户的文件，拼字符串等于把文件里的
+ * `<img onerror=...>` 直接执行掉。这里只认粗体、斜体、行内代码、删除线、链接、
+ * 图片、行内公式和 `<br>`，认不出来的就当普通文字。
+ *
+ * `<br>` 与图片是 #138 补上的：Obsidian、Typora、GitHub 都把格子里的 `<br/>` 画成
+ * 换行，把格子里的 `![](x.png)` 画成图片；2.6 也这样，换内核后这两样都退成了纯文字。
+ * 行内 HTML 里只有 `<br>` 被认：它是最常跟表格一起用的一个，而其它标签（尤其是带
+ * 事件或样式的）放进表格只会多一个要防的口子。
+ *
+ * 公式（#197）：判定照旧交给 math-scan.ts（和正文同一套规则），画由 mathElement
+ * 负责，格子里的 `$x$` 要画成公式。`$$...$$` 在格子里也按行内画：表格的行高由
+ * 单元格决定，一个块级公式会把整行撑开。
+ *
+ * 下划线强调要卡词边界（#161）。CommonMark 与 GFM 里 `_` 不能跨在词中间生效，
+ * 所以 `local_upload / external_api` 是两个普通单词，`snake_case_name` 也一样；
+ * 这里早期只写了 `_` 配对，会把中间那段吃掉变成斜体，连下划线本身也不见了。
+ * `*` 不受这条限制（`a*b*c` 在 CommonMark 里确实是斜体），所以两个分支分开写。
+ * 边界用 Unicode 字母与数字，中文也算词字符。
+ */
+const INLINE_RE =
+  /\*\*(?<strong>.+?)\*\*|(?<![\p{L}\p{N}_])__(?<strongU>(?=\S).+?(?<=\S))__(?![\p{L}\p{N}_])|\*(?<em>.+?)\*|(?<![\p{L}\p{N}_])_(?<emU>(?=\S).+?(?<=\S))_(?![\p{L}\p{N}_])|`(?<code>[^`]+)`|~~(?<strike>.+?)~~|!\[(?<alt>[^\]]*)\]\(\s*(?<src><[^>]*>|[^)\s]+)[^)]*\)|\[(?<linkText>[^\]]*)\]\((?<href>[^)]*)\)|<br\s*\/?>/giud
+
+/** 单元格里的行内代码区间：反引号里的 `$` 不是公式定界符。 */
+function codeSpanRanges(text: string): Excluded[] {
+  const out: Excluded[] = []
+  const re = /`[^`]+`/g
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) out.push({ from: match.index, to: match.index + match[0].length })
+  return out
+}
+
+/**
+ * 往单元格里写一段源码文字，其中的公式画成 KaTeX。
+ *
+ * `from` / `to` 是这段文字在整格源码里的下标：强调、链接里的文字也可能带公式，
+ * 所以按整格的下标取区间，而不是按切片的局部下标。
+ */
+function appendCellText(parent: HTMLElement, text: string, math: MathRange[], from: number, to: number): void {
+  let cursor = from
+  for (const range of math) {
+    // 只处理整段落在这一段里的公式；跨过边界的（`**$x**$` 这类）留着当普通文字
+    if (range.from < cursor || range.to > to) continue
+    if (range.from > cursor) parent.appendChild(document.createTextNode(text.slice(cursor, range.from)))
+    parent.appendChild(mathElement(range.code, false))
+    cursor = range.to
+  }
+  if (cursor < to) parent.appendChild(document.createTextNode(text.slice(cursor, to)))
+}
+
+function appendInline(parent: HTMLElement, text: string, base: string | null): void {
+  // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉
+  const math = scanMath(text, codeSpanRanges(text))
+  const write = (target: HTMLElement, from: number, to: number): void =>
+    appendCellText(target, text, math, from, to)
+
+  INLINE_RE.lastIndex = 0
+  let last = 0
+  let match: RegExpExecArray | null
+  while ((match = INLINE_RE.exec(text)) !== null) {
+    // 落在公式里的标记只是公式的一部分：`$a*b*c$` 里的 `*b*` 不是斜体。
+    // 跳过它，把整段留到最后按公式画。
+    const index = match.index
+    const inside = math.find((range) => range.from <= index && index < range.to)
+    if (inside) {
+      INLINE_RE.lastIndex = inside.to
+      continue
+    }
+    if (match.index > last) write(parent, last, match.index)
+    const g = match.groups ?? {}
+    const at = match.indices?.groups ?? {}
+    if (g.strong !== undefined || g.strongU !== undefined) {
+      const el = document.createElement('strong')
+      const [from, to] = at.strong ?? at.strongU ?? [0, 0]
+      write(el, from, to)
+      parent.appendChild(el)
+    } else if (g.em !== undefined || g.emU !== undefined) {
+      const el = document.createElement('em')
+      const [from, to] = at.em ?? at.emU ?? [0, 0]
+      write(el, from, to)
+      parent.appendChild(el)
+    } else if (g.code !== undefined) {
+      const el = document.createElement('code')
+      el.textContent = g.code
+      parent.appendChild(el)
+    } else if (g.strike !== undefined) {
+      const el = document.createElement('s')
+      const [from, to] = at.strike ?? [0, 0]
+      write(el, from, to)
+      parent.appendChild(el)
+    } else if (g.alt !== undefined) {
+      const img = document.createElement('img')
+      img.src = resolveImageSrc(g.src ?? '', base)
+      img.alt = g.alt
+      parent.appendChild(img)
+    } else if (g.linkText !== undefined) {
+      const el = document.createElement('a')
+      const [from, to] = at.linkText ?? [0, 0]
+      // 空文字的空链接仍然把地址顶上来，否则格子里什么都看不见
+      if (to > from) write(el, from, to)
+      else el.textContent = g.href ?? ''
+      const href = (g.href ?? '').trim()
+      if (/^https?:\/\//i.test(href)) el.setAttribute('href', href)
+      parent.appendChild(el)
+    } else if (/^<br/i.test(match[0])) {
+      parent.appendChild(document.createElement('br'))
+    }
+    last = match.index + match[0].length
+  }
+  if (last < text.length) write(parent, last, text.length)
+}
+
+function collectTables(
+  state: EditorState,
+  ranges: DecorationRange[],
+  front: Range | null,
+  zones: ActiveZone[],
+): void {
+  iterateContent(state, front, (node) => {
+      if (node.name !== 'Table') return
+      zones.push({ from: node.from, to: node.to, kind: 'block' })
+      // 光标在表格里就退回源码：改表格就是改文字（#153）
+      if (isBlockActive(state, node.from, node.to)) {
+        pushBlockLines(state, node.from, node.to, 'cm-md-table', ranges)
+        return false
+      }
+      ranges.push({
+        from: node.from,
+        to: node.to,
+        deco: Decoration.replace({
+          widget: new TableWidget(
+            state.doc.sliceString(node.from, node.to),
+            state.field(documentFileUrlField, false) ?? documentFileUrl,
+            node.from,
+            node.to
+          )
+        }),
+      })
+      return false
+  })
+}
+
+// ─── 链接 ────────────────────────────────────────────────────────────────────
+
+/**
+ * 链接画成链接。
+ *
+ * `[文字](地址)` 里，地址在非编辑行藏起来：正文里只该看到链接文字（Obsidian 就是这样）。
+ * 要改地址，把光标点进这一行，源码就回来了。
+ *
+ * 文字上带 `data-href`，而不是把整段换成 `<a>` widget：换成 widget 的话，链接文字里的
+ * 加粗、行内代码就全没了。点击行为在 editor.ts 里，它认 `data-href`。
+ */
+function collectLinks(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  iterateContent(state, front, (node) => {
+    if (node.name !== 'Link') return
+    // 引用式链接 `[文字][引用]` 和脚注 `[^note]` 都没有 URL 子节点：
+    // 前者保持原样，后者交给脚注那一节画。
+    const url = node.node.getChild('URL')
+    if (!url) return false
+    if (isActiveRange(state, node.from, node.to)) return false
+    const head = state.doc.sliceString(node.from, url.from)
+    const cut = head.lastIndexOf('](')
+    if (cut < 1) return false
+    const textTo = node.from + cut
+    if (textTo <= node.from + 1) return false
+    const href = state.doc.sliceString(url.from, url.to)
+    ranges.push({ from: node.from, to: node.from + 1, deco: hide(node.from, node.from + 1) })
+    ranges.push({ from: textTo, to: node.to, deco: hide(textTo, node.to) })
+    ranges.push({
+      from: node.from + 1,
+      to: textTo,
+      deco: MARK({ class: 'cm-md-link', attributes: { 'data-href': href } }),
+    })
+    return false
+  })
+}
+
+// ─── 脚注 ────────────────────────────────────────────────────────────────────
+//
+// 引用画成上标数字，定义行压淡。悬停预览的卡片在 editor.ts 里（那是交互，不是装饰）。
+
+class FootnoteRefWidget extends WidgetType {
+  constructor(
+    readonly label: string,
+    readonly index: number,
+  ) {
+    super()
+  }
+
+  eq(other: FootnoteRefWidget): boolean {
+    return other.label === this.label && other.index === this.index
+  }
+
+  toDOM(): HTMLElement {
+    const sup = document.createElement('sup')
+    sup.className = 'cm-md-footnote-ref'
+    sup.setAttribute('data-footnote', this.label)
+    sup.textContent = String(this.index)
+    return sup
+  }
+}
+
+function collectFootnotes(state: EditorState, text: string, ranges: DecorationRange[], front: Range | null): void {
+  const numbers = footnoteNumbers(text)
+  const definitions = footnoteDefinitions(text)
+
+  // 引用：整段 `[^note]` 换成上标数字
+  FOOTNOTE_REF_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = FOOTNOTE_REF_RE.exec(text)) !== null) {
+    const from = match.index
+    const to = from + match[0].length
+    if (front && inRange(front, from)) continue
+    if (definitions.has(match[1]) === false && numbers.has(match[1]) === false) continue
+    if (isActiveLine(state, from)) continue
+    ranges.push({
+      from,
+      to,
+      deco: Decoration.replace({ widget: new FootnoteRefWidget(match[1], numbers.get(match[1]) ?? 1) }),
+    })
+  }
+
+  // 定义行：压淡，不隐藏（隐藏了用户就看不到自己写了什么）
+  for (let n = 1; n <= state.doc.lines; n++) {
+    const line = state.doc.line(n)
+    if (!/^ {0,3}\[\^[^\]\s]+\]:/.test(line.text)) continue
+    if (front && inRange(front, line.from)) continue
+    ranges.push({ from: line.from, to: line.from, deco: BLOCK('cm-md-footnote-def') })
+  }
+}
+
+// ─── HTML ────────────────────────────────────────────────────────────────────
+//
+// 文件里的 HTML 照原样画出来，但先过一遍消毒（见 html-sanitize.ts）。
+// 画不出来就退回源码：和公式、mermaid 一样的规矩。
+
+class HTMLWidget extends WidgetType {
+  constructor(
+    readonly source: string,
+    readonly block: boolean,
+    readonly from: number,
+    readonly to: number,
+  ) {
+    super()
+  }
+
+  eq(other: HTMLWidget): boolean {
+    return other.source === this.source && other.block === this.block && other.from === this.from && other.to === this.to
+  }
+
+  toDOM(): HTMLElement {
+    const wrap = document.createElement(this.block ? 'div' : 'span')
+    wrap.className = this.block ? 'cm-md-html cm-md-html-block' : 'cm-md-html cm-md-html-inline'
+    withSourceRange(wrap, this.from, this.to)
+    wrap.appendChild(sanitizeHTML(this.source))
+    return wrap
+  }
+}
+
+function collectHTML(
+  state: EditorState,
+  ranges: DecorationRange[],
+  front: Range | null,
+  zones: ActiveZone[],
+): void {
+  // 成对的行内标签（`<span style="color:red">文字</span>`）一起处理：闭标签的起点记下来，
+  // 轮到它时就跳过。否则两个标签各自成一个 widget，样式落在空标签上（#125）。
+  const paired = new Set<number>()
+  iterateContent(state, front, (node) => {
+    const block = node.name === 'HTMLBlock'
+    if (!block && node.name !== 'HTMLTag') return
+    if (block) zones.push({ from: node.from, to: node.to, kind: 'block' })
+    if (block ? isBlockActive(state, node.from, node.to) : isActiveLine(state, node.from)) return false
+    if (!block) {
+      if (paired.has(node.from)) return false
+      const pair = inlinePair(state, node.from, node.to)
+      if (pair) {
+        paired.add(pair.closeFrom)
+        ranges.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
+        ranges.push({ from: pair.closeFrom, to: pair.closeTo, deco: Decoration.replace({}) })
+        if (pair.closeFrom > node.to) {
+          ranges.push({ from: node.to, to: pair.closeFrom, deco: Decoration.mark({ attributes: { style: pair.style } }) })
+        }
+        return false
+      }
+    }
+    ranges.push({
+      from: node.from,
+      to: node.to,
+      deco: Decoration.replace({ widget: new HTMLWidget(state.doc.sliceString(node.from, node.to), block, node.from, node.to) }),
+    })
+    return false
+  })
+}
+
+/**
+ * 同一行里能配上的一对行内标签，且开标签带可用的 style。
+ * 只认 style：没有样式的 `<b>`、`<br>` 之类还是走原来的单标签路径。
+ * 返回闭标签的位置和过滤后的 style（只含白名单属性）。
+ */
+function inlinePair(state: EditorState, from: number, to: number): { closeFrom: number; closeTo: number; style: string } | null {
+  const open = /^<([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^>]*)?)>$/.exec(state.doc.sliceString(from, to))
+  if (!open) return null
+  const styleAttr = /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(open[2] ?? '')
+  if (!styleAttr) return null
+  const style = cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '')
+  if (!style) return null
+  const rest = state.doc.sliceString(to, state.doc.lineAt(from).to)
+  const close = new RegExp(`</${open[1]}\\s*>`, 'i').exec(rest)
+  if (!close) return null
+  const closeFrom = to + close.index
+  return { closeFrom, closeTo: closeFrom + close[0].length, style }
+}
+
+// ─── 代码块的复制按钮 ────────────────────────────────────────────────────────
+
+/**
+ * 代码块右上角的「复制」。
+ *
+ * 做成 widget 而不是事后往 DOM 里插一个按钮：CM6 会按自己的状态重建 DOM，
+ * 手工插进去的节点随时会被抹掉（旧核心为此专门把按钮放在编辑器 DOM 之外，
+ * 还得跟着滚动重新定位）。widget 由 CM6 自己管，位置、滚动、重建都不用操心。
+ */
+class CodeCopyWidget extends WidgetType {
+  constructor(readonly code: string) {
+    super()
+  }
+
+  eq(other: CodeCopyWidget): boolean {
+    return other.code === this.code
+  }
+
+  toDOM(): HTMLElement {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'code-copy-btn'
+    button.textContent = isChinese() ? '复制' : 'Copy'
+    button.setAttribute('data-code', this.code)
+    button.contentEditable = 'false'
+    return button
+  }
+
+  ignoreEvent(): boolean {
+    // 让点击落到按钮自己身上，而不是被编辑器当成「放置光标」
+    return false
+  }
+}
+
+/** 围栏里的代码：去掉开头那一行（` ```lang `）与收尾那一行。 */
+function codeInsideFence(state: EditorState, node: SyntaxNodeRef): string {
+  const startLine = state.doc.lineAt(node.from).number
+  const endLine = state.doc.lineAt(Math.max(node.from, node.to - 1)).number
+  if (endLine - startLine < 2) return ''
+  const lines: string[] = []
+  for (let n = startLine + 1; n < endLine; n++) lines.push(state.doc.line(n).text)
+  return lines.join('\n')
+}
+
+// ─── 图片 ────────────────────────────────────────────────────────────────────
+
+function collectImages(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  const base = state.field(documentFileUrlField, false) ?? documentFileUrl
+  iterateContent(state, front, (node) => {
+    if (node.name !== 'Image') return
+    // 光标在图片这一行就退回源码：改路径就是改文字
+    if (isActiveRange(state, node.from, node.to)) return false
+    const source = state.doc.sliceString(node.from, node.to)
+    const parsed = parseImage(source)
+    if (!parsed) return false
+    ranges.push({
+      from: node.from,
+      to: node.to,
+      deco: Decoration.replace({ widget: new ImageWidget(resolveImageSrc(parsed.src, base), parsed.alt, source, node.from, node.to) }),
+    })
+    return false
+  })
+}
+
+// ─── 引用块与分隔线 ──────────────────────────────────────────────────────────
+
+function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  iterateContent(state, front, (node) => {
+    switch (node.name) {
+      case 'Blockquote': {
+        pushBlockLines(state, node.from, node.to, 'cm-md-blockquote', ranges)
+        break
+      }
+      case 'HorizontalRule': {
+        // 行装饰：`---` 本身要藏起来，横线靠行的上边框画。
+        // （属性区里的 `---` 是 YAML 的分隔符，已被 iterateContent 挡在外面）
+        const lineFrom = state.doc.lineAt(node.from).from
+        ranges.push({ from: lineFrom, to: lineFrom, deco: BLOCK('cm-md-hr') })
+        if (!isActiveLine(state, node.from)) {
+          ranges.push({ from: node.from, to: node.to, deco: hide(node.from, node.to) })
+        }
+        break
+      }
+      case 'ListMark': {
+        if (!hasListSpace(state, node.to)) break
+        // 缩进只由一处分派：样式表按层级给左内边距（cm-md-li-N），所以源码里那几个
+        // 空格在渲染模式下要藏起来。留着的话，排版是「CSS 缩进 + 源码空格」两份叠在
+        // 一起：实测二级 56px、三级 88px，比旧引擎（每层 24px）多出三成，越深越夸张
+        // （2026-11-07 橘子：「我不喜欢列表缩进那么多的排版…tab 之后，也太多了」）。
+        // 引用里的列表跳过行首 `> `，那一段归 QuoteMark 自己藏，避免两份 replace 撞区间。
+        const line = state.doc.lineAt(node.from)
+        const quoteLen = QUOTE_PREFIX_RE.exec(state.doc.sliceString(line.from, node.from))?.[0].length ?? 0
+        const hideFrom = line.from + quoteLen
+        if (node.from > hideFrom) ranges.push({ from: hideFrom, to: node.from, deco: hide(hideFrom, node.from) })
+        const raw = state.doc.sliceString(node.from, node.to).trim()
+        // 待办项的圆点要去掉：它已经有复选框了，两个标记并排就是「• ☐ 文案」。
+        const after = state.doc.sliceString(node.to, node.to + 4)
+        if (/^\s+\[[ xX]\]/.test(after)) {
+          hideMarker(state, node.from, node.to, ranges, isActiveLine(state, node.from))
+          break
+        }
+        // `-` / `*` / `+` 画成真的圆点；`1.` 这种照原样显示，序号就是文件里的字
+        if (/^[-*+]$/.test(raw) && !isActiveLine(state, node.from)) {
+          ranges.push({
+            from: node.from,
+            to: node.to,
+            deco: Decoration.replace({ widget: new ListBulletWidget() }),
+          })
+        } else {
+          ranges.push({ from: node.from, to: node.to, deco: MARK({ class: 'cm-md-listmark' }) })
+        }
+        break
+      }
+      // 列表项：整行加类，类名里带上嵌套层级，CSS 据此缩进。
+      // CM6 没有 ul/ol/li 元素，缩进只能自己算；层级来自语法的嵌套深度。
+      case 'ListItem': {
+        pushListItemLines(state, node.node, ranges)
+        break
+      }
+      case 'FencedCode': {
+        // 右上角的复制按钮挂在第一行（围栏那一行）末尾，鼠标悬停代码块时才显形。
+        // 导出态不加：导出的是一篇文档，不是编辑器此刻的样子。
+        const code = exportingCleanly(state) ? '' : codeInsideFence(state, node)
+        if (code !== '') {
+          ranges.push({
+            from: state.doc.lineAt(node.from).to,
+            to: state.doc.lineAt(node.from).to,
+            deco: Decoration.widget({ widget: new CodeCopyWidget(code), side: 1 }),
+          })
+        }
+        const startLine = state.doc.lineAt(node.from)
+        const endLine = state.doc.lineAt(Math.max(node.from, node.to - 1))
+        // 每一行都加底色，首行与末行额外加圆角，拼出一个代码块的外形
+        for (let n = startLine.number; n <= endLine.number; n++) {
+          const lineFrom = state.doc.line(n).from
+          const cls = [
+            'cm-md-codeblock',
+            n === startLine.number ? 'cm-md-codeblock-first' : '',
+            n === endLine.number ? 'cm-md-codeblock-last' : '',
+          ].filter(Boolean).join(' ')
+          ranges.push({ from: lineFrom, to: lineFrom, deco: BLOCK(cls) })
+        }
+        break
+      }
+      case 'QuoteMark': {
+        // `>` 在光标不在这一行时藏起来（连它后面的空格），引用就该只看到竖线与文字
+        // 例外：这一行除了 `>` 别的什么都没有。刚打出一个 `>` 就把它藏掉，屏幕上什么
+        // 都不剩，得再打个空格才出现引用竖线（2026-11-07 与标题同一个毛病）。
+        const rest = state.doc.sliceString(node.to, state.doc.lineAt(node.to).to)
+        if (rest.trim() === '' || isActiveLine(state, node.from)) {
+          ranges.push({ from: node.from, to: node.to, deco: MARK({ class: 'cm-md-quotemark' }) })
+        } else {
+          hideMarker(state, node.from, node.to, ranges)
+        }
+        break
+      }
+      default:
+        break
+    }
+  })
+}
+
+// ─── 标题与行内格式 ──────────────────────────────────────────────────────────
+//
+// 节点名以实际语法树为准（用 node_modules/.cache/domcheck 验过，见 scripts/tmp-domcheck.mjs）：
+//   ATXHeading1..6   标题
+//   EmphasisMark     `*` 与 `**` 都用这个名字，没有单独的 StrongEmphasisMark
+//   StrikethroughMark `~~`
+//   CodeMark         行内代码的反引号
+//   InlineCode       行内代码本体
+//   URL              链接地址
+/**
+ * 裸链接（GFM autolink）的终点：中日韩文字与全角标点。
+ *
+ * 解析器只把空白当断点，所以中文冒号、句号后面的话会被一起吞进 URL，整段染成链接色。
+ * 链接该在文字出现的地方结束。
+ */
+const URL_STOP = /[\u2E80-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/
+
+function collectInline(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  iterateContent(state, front, (node) => {
+      const from = node.from
+      const to = node.to
+      const active = isActiveLine(state, from)
+
+      switch (node.name) {
+        case 'ATXHeading1':
+        case 'ATXHeading2':
+        case 'ATXHeading3':
+        case 'ATXHeading4':
+        case 'ATXHeading5':
+        case 'ATXHeading6': {
+          // 行装饰：标题的字号属于整行，加在行上才撑得住行高
+          // 只认「# + 空格」。CommonMark 把孤零零一个 `#` 也算成空标题，于是刚打出一个
+          // `#`、空格还没落下，整行就先变成标题、`#` 还被藏起来：看起来像字打丢了，
+          // 接着打字母又退回普通段落，一亮一灭（2026-11-07 报的「我还没点空格呢」）。
+          // Typora 与 Obsidian 都是等空格出现才开始当标题。
+          const head = state.doc.sliceString(from, state.doc.lineAt(from).to)
+          if (!/^#{1,6}[ \t]/.test(head)) return false
+          pushBlockLines(state, from, to, `cm-md-${node.name.toLowerCase()}`, ranges)
+          break
+        }
+        case 'EmphasisMark':
+        case 'StrikethroughMark':
+        case 'CodeMark': {
+          const fence = node.node.parent
+          // 整块 Mermaid 替换与围栏空替换同起点时，增量更新会只留下空块。
+          if (node.name === 'CodeMark' && fence?.name === 'FencedCode' &&
+              !isBlockActive(state, fence.from, fence.to) &&
+              /^(`{3,}|~{3,})\s*mermaid\s*$/.test(state.doc.sliceString(fence.from, state.doc.lineAt(fence.from).to).trim()) &&
+              codeInsideFence(state, fence).trim()) break
+          ranges.push({ from, to, deco: active ? MARK({ class: 'cm-md-marker' }) : hide(from, to) })
+          break
+        }
+        case 'CodeInfo': {
+          // 围栏上的语言名（```js 里的 js）。压淡，让它读起来是标注而不是代码。
+          ranges.push({ from, to, deco: MARK({ class: 'cm-md-codeinfo' }) })
+          break
+        }
+        case 'HeaderMark': {
+          // 标题的 `#` 连同后面那个空格一起藏，否则标题会比正文右移一个字
+          hideMarker(state, from, to, ranges, active)
+          break
+        }
+        case 'InlineCode': {
+          ranges.push({ from, to, deco: MARK({ class: 'cm-md-inlinecode' }) })
+          break
+        }
+        case 'StrongEmphasis': {
+          ranges.push({ from, to, deco: MARK({ class: 'cm-md-strong' }) })
+          break
+        }
+        case 'Emphasis': {
+          ranges.push({ from, to, deco: MARK({ class: 'cm-md-em' }) })
+          break
+        }
+        case 'Strikethrough': {
+          ranges.push({ from, to, deco: MARK({ class: 'cm-md-strike' }) })
+          break
+        }
+        case 'URL': {
+          // 解析器只把空白当断点，`https://example.com/a：后面还有` 整段都会被当成 URL。
+          // 一打中文冒号，后半行就染成链接色、格式看着像丢了（2026-11-07 报的「点冒号
+          // 的时候，后面的格式就丢了」）。Typora 与 Obsidian 都停在中文和全角标点处，
+          // 所以这里把链接切到第一个中日韩字符或全角标点之前。
+          const raw = state.doc.sliceString(from, to)
+          const stop = raw.search(URL_STOP)
+          const end = stop < 0 ? to : from + stop
+          if (end > from) ranges.push({ from, to: end, deco: MARK({ class: 'cm-md-url' }) })
+          break
+        }
+        default:
+          break
+    }
+  })
+}
+
+// ─── 分页 ────────────────────────────────────────────────────────────────────
+//
+// 一个 `---` 就是一页，这是放映与导出幻灯片 PDF 共用的切法（2026-09-26 定）。
+//
+// 页码写成行装饰的类名（`cm-md-page-N`），而不是让放映层去数 DOM 的第几个孩子：
+// CM6 会往正文里插 gap 元素，序号对不上；而 `---` 在代码块里不是 HorizontalRule，
+// 用语法树判断也就不会把代码块里的分隔线当成分页。
+// 每页的第一行额外带 `cm-md-page-start`，导出时靠它插分页符。
+export const PAGE_CLASS_PREFIX = 'cm-md-page-'
+export const PAGE_START_CLASS = 'cm-md-page-start'
+
+function collectPages(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+  const breaks: number[] = []
+  iterateContent(state, front, (node) => {
+    if (node.name !== 'HorizontalRule') return
+    breaks.push(state.doc.lineAt(node.from).number)
+  })
+
+  let page = 0
+  let nextBreak = 0
+  let startsPage = true
+  for (let n = 1; n <= state.doc.lines; n++) {
+    const lineFrom = state.doc.line(n).from
+    const classes = [`${PAGE_CLASS_PREFIX}${page}`]
+    if (startsPage) classes.push(PAGE_START_CLASS)
+    ranges.push({ from: lineFrom, to: lineFrom, deco: BLOCK(classes.join(' ')) })
+    startsPage = false
+    // 分隔线归它结束的那一页，下一行开新的一页
+    if (nextBreak < breaks.length && breaks[nextBreak] === n) {
+      page++
+      nextBreak++
+      startsPage = true
+    }
+  }
+}
+
+// ─── 大纲跳转的落点高亮 ──────────────────────────────────────────────────────
+//
+// 用一个 effect 驱动，不再靠「派发一个空选区事务」去逼装饰重算：
+// 装饰现在住在 StateField 里，只在文档或选区真的变了时才重算，空事务不会触发它。
+
+export const headingFlashEffect = StateEffect.define<{ from: number; to: number } | null>()
+
+/** 当前的落点高亮区间。effect 与重算共享这一份真相。 */
+let currentFlash: { from: number; to: number } | null = null
+
+// ─── 组装 ────────────────────────────────────────────────────────────────────
+
+interface ActiveZone {
+  from: number
+  to: number
+  kind: 'frontmatter' | 'block'
+}
+
+const zonesByDeco = new WeakMap<DecorationSet, ActiveZone[]>()
+
+/** 选区当前落进了哪些需要展开源码的块。没变就不必在拖选时重算整篇装饰（#201）。 */
+function activeZonesKey(state: EditorState, zones: readonly ActiveZone[]): string {
+  if (zones.length === 0) return ''
+  const main = state.selection.main
+  const parts: string[] = []
+  for (let i = 0; i < zones.length; i++) {
+    const z = zones[i]
+    if (z.kind === 'frontmatter') {
+      const hit = state.selection.ranges.some((r) => r.empty && r.head >= z.from && r.head <= z.to)
+      if (hit) parts.push(`f:${z.from}:${z.to}`)
+    } else if (main.from >= z.from && main.to <= z.to) {
+      parts.push(`b:${z.from}:${z.to}`)
+    }
+  }
+  return parts.join('|')
+}
+
+function buildDecorations(state: EditorState, flash: { from: number; to: number } | null): DecorationSet {
+  const ranges: DecorationRange[] = []
+  const zones: ActiveZone[] = []
+  const text = state.doc.toString()
+  const excluded = excludedRanges(text, syntaxTree(state))
+  // 属性区的区间要算一次、多处用：压淡它、把它里面的 YAML 排出 markdown 排版、
+  // 不让它的 `---` 被当成分页。
+  const front = frontmatterRange(text)
+
+  if (flash && flash.to <= state.doc.length) {
+    ranges.push({ from: flash.from, to: flash.to, deco: MARK({ class: 'cm-md-jump-flash' }) })
+  }
+
+  collectBlocks(state, ranges, front)
+  collectLinks(state, ranges, front)
+  collectFootnotes(state, text, ranges, front)
+  collectHTML(state, ranges, front, zones)
+  collectImages(state, ranges, front)
+  collectPages(state, ranges, front)
+  collectInline(state, ranges, front)
+  collectFrontmatter(state, ranges, front, zones)
+  collectTables(state, ranges, front, zones)
+  collectTaskItems(state, ranges, front)
+  collectMermaid(state, text, ranges, front, zones)
+  collectHighlight(state, text, ranges, excluded)
+  // 公式放最后：它覆盖区间，其它装饰不该插进它里面
+  collectMath(state, text, excluded, ranges, zones)
+
+  // 排序键必须带上 startSide：RangeSetBuilder 只接受按 (from, startSide) 递增的顺序，
+  // 原来只按 (from, to) 排，同一段区间上挂了两种装饰时就翻车。
+  //
+  // 真事（#157）：`[![图](pic.png)](https://…)` 这种「链接里只包一张图」的写法，链接
+  // mark（startSide 5e8）和图片 widget（startSide 5e8 - 1）盖的是**同一段区间**，(from, to)
+  // 完全相等，先后全看数组原来的顺序。mark 排在前面就抛
+  // 「Ranges must be added sorted by `from` position and `startSide`」，整个装饰层作废，
+  // 表现是文件打开了但正文空白。
+  ranges.sort((a, b) => a.from - b.from || a.deco.startSide - b.deco.startSide || a.to - b.to)
+  const builder = new RangeSetBuilder<Decoration>()
+  for (const r of ranges) builder.add(r.from, r.to, r.deco)
+  const deco = builder.finish()
+  zonesByDeco.set(deco, zones)
+  return deco
+}
+
+/**
+ * 装饰层。
+ *
+ * 文档变化、解析推进、导出开关切换时重算；单纯移动光标或拖选文字时，只有跨进/跨出
+ * 块级替换区（表格、图、块公式、HTML 块、属性区）才重算，避免大文档拖选卡死（#201）。
+ */
+export const livePreviewField = StateField.define<DecorationSet>({
+  create: (state) => buildDecorations(state, null),
+  update(deco, tr) {
+    const flash = tr.effects.find((effect) => effect.is(headingFlashEffect))
+    const flashValue = flash ? (flash.value as { from: number; to: number } | null) : currentFlash
+    if (flash) currentFlash = flashValue
+    const parsed = tr.effects.some((effect) => effect.is(decorationsRefreshEffect))
+    // 文档换了个文件，图片的相对路径要按新的基准重新解析
+    const rebased = tr.effects.some((effect) => effect.is(setDocumentFileUrlEffect))
+    const clean = tr.state.field(cleanExportField, false) ?? false
+    const wasClean = tr.startState.field(cleanExportField, false) ?? false
+    if (!tr.docChanged && !flash && !parsed && !rebased && clean === wasClean) {
+      if (!tr.selection) return deco
+      const zones = zonesByDeco.get(deco) ?? []
+      if (activeZonesKey(tr.state, zones) === activeZonesKey(tr.startState, zones)) {
+        return deco
+      }
+    }
+    return buildDecorations(tr.state, flashValue)
+  },
+  provide: (field) => EditorView.decorations.from(field),
+})
+
+/** 解析往前推进之后，请重算一次装饰。 */
+export const decorationsRefreshEffect = StateEffect.define<null>()
+
+/**
+ * 装饰是从语法树上读出来的，而语法树是**按视口惰性解析**的：长文档刚打开时，
+ * 树只覆盖开头一段。用户滚到没解析过的地方，CM6 会照常把那几行渲染出来，但那时
+ * 装饰里根本没有它们，于是屏幕上显示的是原始源码（`- **加粗**` 这种），
+ * 要等下一次重算（点一下、敲一下）才恢复正常。
+ *
+ * 所以这里盯着视口：树没铺到视口末尾就推一把解析，解析推进了就请装饰重算一次。
+ * `forceParsing` 自己会在树变了之后派发一次空事务，于是这个插件会被再叫一次，
+ * 那时再重算，滚动到哪儿就渲染到哪儿。
+ *
+ * 两件事都推到 `setTimeout` 里做：**update 进行中不允许 dispatch**，就地派发会让
+ * 插件直接崩掉（`Calls to EditorView.update are not allowed while an update is in progress`）。
+ */
+const parseRefresh = ViewPlugin.fromClass(class {
+  private parsed = 0
+  private pending = false
+  private attempts = 0
+  update(update: ViewUpdate) {
+    const tree = syntaxTree(update.state)
+    const grew = tree.length > this.parsed
+    this.parsed = tree.length
+    const viewportEnd = update.view.viewport.to
+    if (tree.length >= viewportEnd) {
+      this.attempts = 0
+      if (grew) this.later(update.view, null)
+      return
+    }
+    this.later(update.view, viewportEnd)
+  }
+  private later(view: EditorView, parseTo: number | null, delay = 0) {
+    if (this.pending) return
+    this.pending = true
+    setTimeout(() => {
+      this.pending = false
+      if (!view.dom.isConnected) return
+      // 中文输入法正在组字：这一笔装饰刷新会打断组字，候选框里的字就没了。
+      // 等组字结束再来，组字结束本身会让 CodeMirror 再走一次 update。
+      // （脚本里的 insertText 不走组字，所以验收覆盖不到这一条，只能靠这条守卫。）
+      if (view.composing) {
+        this.later(view, parseTo, 120)
+        return
+      }
+      if (parseTo !== null) forceParsing(view, parseTo)
+      view.dispatch({ effects: decorationsRefreshEffect.of(null) })
+      // `forceParsing` 是有时间预算的：机器忙的时候一次推不到视口末尾，
+      // 而装饰是照着语法树算的，树没铺到的地方就会露出原始 markdown。
+      // 所以要一直补到铺满为止（次数封顶，避免文档本身有问题时空转）。
+      if (syntaxTree(view.state).length < view.viewport.to && this.attempts < 40) {
+        this.attempts += 1
+        this.later(view, view.viewport.to, delay)
+      }
+    }, 0)
+  }
+})
+
+// 这几个必须一起装进编辑器：`livePreviewField` 要读前两个 field，
+// 读不到就当成「没有焦点、不在导出」，那一行源码就永远不会显形；
+// `parseRefresh` 负责在解析推进后叫它重算。
+export const livePreview: Extension = [
+  editorFocusField,
+  cleanExportField,
+  documentFileUrlField,
+  livePreviewField,
+  parseRefresh,
+]

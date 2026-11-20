@@ -1,0 +1,126 @@
+appId: ai.marswave.colamdct
+productName: ColaMD CT
+copyright: Copyright © 2024-2026 marswave.ai. ColaMD CT is a community enhancement build under the MIT license.
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/**/*
+  # All runtime JavaScript is bundled by electron-vite. Do not let
+  # electron-builder copy the complete production dependency tree into app.asar.
+  - '!node_modules/**/*'
+
+asar:
+  # The packaged app has no native modules. Avoid builder's broad automatic
+  # unpacking heuristics and keep the archive self-contained.
+  smartUnpack: false
+
+# ColaMD provides its own Chinese/English UI and only needs these Chromium
+# locale resources. Keeping every Electron locale adds tens of megabytes.
+# Electron uses hyphens on Linux and underscores in macOS .lproj names.
+electronLanguages:
+  - en-US
+  - en_US
+  - zh-CN
+  - zh_CN
+
+extraResources:
+  - from: resources/templates
+    to: templates
+  - from: resources/demo
+    to: demo
+
+npmArgs:
+  - "--loglevel=error"
+
+afterPack: ./scripts/afterPack.js
+
+fileAssociations:
+  - ext: md
+    name: Markdown Document
+    role: Editor
+    mimeType: text/markdown
+  - ext: markdown
+    name: Markdown Document
+    role: Editor
+    mimeType: text/markdown
+  - ext: txt
+    name: Text Document
+    role: Editor
+    mimeType: text/plain
+
+mac:
+  compression: maximum
+  # Publish separate installers for each CPU architecture instead of a
+  # universal binary. This keeps both Intel and Apple Silicon support while
+  # avoiding the duplicated Electron framework in every download.
+  artifactName: 'ColaMD-CT-${version}-${arch}.${ext}'
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    # CT：pkg 安装包（企业部署/免拖拽安装）。dmg/pkg 只能在真 macOS 上构建
+    # （dmgbuild 带 PyObjC darwin 二进制、pkg 要 pkgbuild），见 release-ct.yml。
+    - target: pkg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  category: public.app-category.productivity
+  icon: resources/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  # 官方版 notarize:true 依赖官方签名密钥；CT 无证书，公证一并关闭，
+  # 否则 CI/本地 mac 构建会在签名步骤报错。
+  notarize: false
+
+win:
+  # Artifact names must stay distinct from the mac ones: the mac zips are
+  # ColaMD-CT-<version>-<arch>.zip, so a plain win zip would collide with the mac
+  # x64 zip in the release assets. No spaces anywhere (see the nsis note below).
+  artifactName: ColaMD-CT-${version}-win-${arch}.${ext}
+  target:
+    - nsis
+    # Green build: unzip anywhere and run, nothing to install. No file
+    # association, no Start Menu entry and no in-app updates, by design.
+    - zip
+  icon: resources/icon.png
+
+linux:
+  artifactName: ColaMD-CT-${version}-${arch}.${ext}
+  target:
+    - AppImage
+    - deb
+  category: Office
+  # A directory of size-named PNGs, not one 1024px file: with a single PNG the
+  # AppImage shipped exactly one hicolor entry, and start menus / taskbars ask
+  # for standard sizes like 48 or 256 first (#127).
+  # StartupWMClass must match Electron's window class, which is package.json's
+  # lowercase name — CT 是 colamd-ct（官方版是 colamd）。
+  icon: resources/icons
+  desktop:
+    entry:
+      StartupWMClass: colamd-ct
+
+nsis:
+  # No spaces: the default "${productName} Setup ${version}.exe" gets sanitized
+  # two different ways (latest.yml: space -> "-", GitHub asset: space -> "."),
+  # so the updater requested a filename that never existed on the release
+  # (ColaMD-Setup-2.0.0.exe vs ColaMD.Setup.2.0.0.exe) and every in-app update
+  # on Windows failed with a silent 404 (#56).
+  artifactName: ColaMD-CT-Setup-${version}.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: ColaMD CT
+
+# ColaMD CT: in-app updates are disabled on purpose. This build points at no
+# release feed; auto-updating would install the official ColaMD over this
+# enhanced build. Update by rebuilding from source instead.

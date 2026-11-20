@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      mac_arch:
+        description: 'macOS architecture (separate = one installer per architecture)'
+        type: choice
+        options:
+          - separate
+          - universal
+          - x64
+          - arm64
+        default: separate
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: mac
+            sign: true
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - run: npm run build
+
+      - name: Build distributables
+        shell: bash
+        run: |
+          ARCH_ARGS=""
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            case "${{ inputs.mac_arch || 'separate' }}" in
+              separate) ARCH_ARGS="" ;;
+              x64) ARCH_ARGS="--x64" ;;
+              arm64) ARCH_ARGS="--arm64" ;;
+              universal) ARCH_ARGS="--universal" ;;
+              *) ARCH_ARGS="" ;;
+            esac
+          fi
+          npx electron-builder --${{ matrix.platform }} $ARCH_ARGS --publish never
+        env:
+          CSC_LINK: ${{ matrix.sign && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.sign && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.sign && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.sign && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.sign && secrets.APPLE_TEAM_ID || '' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+            release/*.yml
+            release/*.blockmap
+          if-no-files-found: ignore
+
+  # Tag pushes publish a release; manual dispatches are build-only so the
+  # artifacts can be verified (or attached manually) before attaching them.
+  #
+  # `COLAMD_PRERELEASE=true` publishes the release as a pre-release. Stable
+  # installs ask GitHub for `/releases/latest`, which never returns a
+  # pre-release, so those users are not offered the version; anyone who wants
+  # it can still download it from the releases page. The flag is read at
+  # creation time, so there is no window in which a pre-release is briefly
+  # live as the latest release. Promote the same build by clearing the
+  # variable and running `gh release edit <tag> --prerelease=false --latest`.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The version's section in resources/demo/changelog.md is what users
+      # read in the app, so it is also what they read on the release page.
+      # GitHub's generated notes only ever listed merge commits.
+      - name: Take the release notes from the changelog
+        id: notes
+        run: |
+          set -euo pipefail
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            BEGIN { target = "## v" v }
+            index($0, target) == 1 { found = 1; print; next }
+            found && /^## / { exit }
+            found { print }
+          ' resources/demo/changelog.md > "$RUNNER_TEMP/notes.md"
+          # The section below ours is the previous release, so the changelog
+          # alone gives the compare range: no need to fetch the tags.
+          PREVIOUS=$(awk -v v="${GITHUB_REF_NAME#v}" '
+            BEGIN { target = "## v" v }
+            index($0, target) == 1 { found = 1; next }
+            found && /^## v/ { print substr($2, 2); exit }
+          ' resources/demo/changelog.md)
+          if [ -s "$RUNNER_TEMP/notes.md" ] && [ -n "$PREVIOUS" ]; then
+            printf '\n**Full Changelog**: https://github.com/%s/compare/v%s...%s\n' \
+              "$GITHUB_REPOSITORY" "$PREVIOUS" "$GITHUB_REF_NAME" >> "$RUNNER_TEMP/notes.md"
+          fi
+          if [ -s "$RUNNER_TEMP/notes.md" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Release notes::resources/demo/changelog.md has no section for ${GITHUB_REF_NAME}; publishing with generated notes"
+          fi
+
+      - name: Publish with the changelog section
+        if: steps.notes.outputs.found == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body_path: ${{ runner.temp }}/notes.md
+          prerelease: ${{ vars.COLAMD_PRERELEASE == 'true' }}
+
+      # A missing section still publishes, so a typo in the version number
+      # cannot leave a tagged release unpublished. The warning above is the
+      # signal to add the missing section.
+      - name: Publish with generated notes
+        if: steps.notes.outputs.found != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ vars.COLAMD_PRERELEASE == 'true' }}
