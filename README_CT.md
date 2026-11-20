@@ -38,7 +38,17 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 # 产物回拷到 release/：ColaMD-CT-<v>-x86_64.AppImage + ColaMD-CT-<v>-amd64.deb
 ```
 
-**macOS**：`wsl-build.sh` 会构建**不签名**的 mac zip（`mac-dist` 阶段，含完整 .app 与 framework 符号链接）；**dmg 与签名/公证必须在真 macOS 上**（`npm run dist:mac`，electron-builder 硬限制）。未签名 zip 解压后在 macOS 上需**右键 → 打开**过一次 Gatekeeper。
+**macOS**：
+
+- **zip（本机即出）**：`wsl-build.sh` 的 `mac-dist` 阶段构建**不签名** zip（含完整 .app 与 framework 符号链接），解压后右键 → 打开过一次 Gatekeeper 即可用。
+- **dmg / pkg（需要真 macOS）**：这是二进制层面的硬限制，交叉构建走不通——实测证据：dmg 底层的 dmgbuild 工具链绑定的 Python/PyObjC 是 `*-darwin.so`（Mach-O），pkg 底层的 `pkgbuild`/`productbuild` 是 macOS 专属。两条正途：
+  1. **GitHub Actions（推荐，免费）**：仓库已带 `.github/workflows/release-ct.yml`。推到你的 GitHub 后，Actions 页手动 Run workflow（或 `git tag v2.7.15 && git push --tags`），产物在 Artifacts：**dmg + pkg + zip，arm64 与 x64 各一份**（未签名）。
+     ```bash
+     git remote add origin git@github.com:<你>/colamd-ct.git
+     git push -u origin main
+     ```
+  2. **任意一台 Mac**：`bash build-tools/mac-build.sh` 一键产出同样的 dmg + pkg + zip。
+- 需要签名/公证：把证书配进 Secrets 并按 electron-builder 文档设置（工作流里已留 `CSC_IDENTITY_AUTO_DISCOVERY` 开关位）。
 
 > 网络差的环境：脚本全部走 npmmirror 镜像（electron / electron-builder-binaries / npm registry）；electron-builder 自带下载器对大文件常被 CDN 掐断，`wsl-build.sh` 用 curl 断点续传 + `electronDist` 绕过。
 
