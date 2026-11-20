@@ -36,10 +36,17 @@ jobs:
       - name: Build renderer/main
         run: npx electron-vite build
 
-      - name: Package dmg / pkg / zip (unsigned)
-        run: npx electron-builder --mac dmg pkg zip --arm64 --x64 --publish never
+      - name: Package dmg / pkg / zip, x64 (unsigned)
+        run: npx electron-builder --mac dmg pkg zip --x64 --publish never
         env:
           # 无签名证书时跳过签名/公证，产出未签名包（首次打开需右键 → 打开）
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # pkg 多架构并行会争抢同一个中间文件 ai.marswave.colamdct.pkg（electron-builder
+      # 已知竞态，实测 ENOENT unlink），x64/arm64 分两步串行构建规避。
+      - name: Package dmg / pkg / zip, arm64 (unsigned)
+        run: npx electron-builder --mac dmg pkg zip --arm64 --publish never
+        env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Upload artifacts
