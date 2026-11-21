@@ -1,20 +1,25 @@
 name: Release
 
+# ColaMD CT 的统一发布工作流：推 v* 标签时三平台构建并发布 GitHub Release。
+#
+#   - macOS：dmg / pkg / zip，x64 与 arm64 串行构建（pkg 多架构并行会争抢同一个
+#     中间文件 ai.marswave.colamdct.pkg，electron-builder 已知竞态，实测 ENOENT
+#     unlink，串行规避）
+#   - Windows：NSIS 安装器 + 便携 zip
+#   - Linux：AppImage + deb
+#
+# 全部未签名（CT 无证书）：mac 首次打开需右键 → 打开，Windows 会过 SmartScreen
+# 提示。需要签名/公证时把证书配进 Secrets 并按 electron-builder 文档设置。
+#
+# Release 正文取 resources/demo/changelog.md 里对应版本的段落（用户在应用内读
+# 到的就是这一段，发布页保持一致）。手动触发（Actions → Run workflow）只构建
+# 不发版，产物在 Artifacts 里核对。
+
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      mac_arch:
-        description: 'macOS architecture (separate = one installer per architecture)'
-        type: choice
-        options:
-          - separate
-          - universal
-          - x64
-          - arm64
-        default: separate
 
 jobs:
   build:
@@ -24,7 +29,6 @@ jobs:
         include:
           - os: macos-latest
             platform: mac
-            sign: true
           - os: windows-latest
             platform: win
           - os: ubuntu-latest
@@ -39,54 +43,44 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm install
+      - run: npm install --no-audit --no-fund
 
       - run: npm run build
 
-      - name: Build distributables
-        shell: bash
+      # dmg / pkg 只能在真 macOS 上构建（二进制层面的硬限制，见 README_CT.md）。
+      # x64 与 arm64 串行两步，规避 pkg 的多架构竞态。
+      - name: Build distributables (macOS, unsigned)
+        if: matrix.platform == 'mac'
         run: |
-          ARCH_ARGS=""
-          if [ "${{ matrix.platform }}" = "mac" ]; then
-            case "${{ inputs.mac_arch || 'separate' }}" in
-              separate) ARCH_ARGS="" ;;
-              x64) ARCH_ARGS="--x64" ;;
-              arm64) ARCH_ARGS="--arm64" ;;
-              universal) ARCH_ARGS="--universal" ;;
-              *) ARCH_ARGS="" ;;
-            esac
-          fi
-          npx electron-builder --${{ matrix.platform }} $ARCH_ARGS --publish never
+          npx electron-builder --mac dmg pkg zip --x64 --publish never
+          npx electron-builder --mac dmg pkg zip --arm64 --publish never
         env:
-          CSC_LINK: ${{ matrix.sign && secrets.CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.sign && secrets.CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ matrix.sign && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.sign && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.sign && secrets.APPLE_TEAM_ID || '' }}
+          # 无签名证书时跳过签名/公证，产出未签名包
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Build distributables (Windows)
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --publish never
+
+      - name: Build distributables (Linux)
+        if: matrix.platform == 'linux'
+        run: npx electron-builder --linux --publish never
 
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.platform }}
           path: |
             release/*.dmg
+            release/*.pkg
             release/*.zip
             release/*.exe
             release/*.AppImage
             release/*.deb
             release/*.yml
             release/*.blockmap
-          if-no-files-found: ignore
+          if-no-files-found: error
 
-  # Tag pushes publish a release; manual dispatches are build-only so the
-  # artifacts can be verified (or attached manually) before attaching them.
-  #
-  # `COLAMD_PRERELEASE=true` publishes the release as a pre-release. Stable
-  # installs ask GitHub for `/releases/latest`, which never returns a
-  # pre-release, so those users are not offered the version; anyone who wants
-  # it can still download it from the releases page. The flag is read at
-  # creation time, so there is no window in which a pre-release is briefly
-  # live as the latest release. Promote the same build by clearing the
-  # variable and running `gh release edit <tag> --prerelease=false --latest`.
+  # 标签推送时发布 Release；手动触发只构建，产物可先在 Artifacts 里核对。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
@@ -116,13 +110,17 @@ jobs:
             found { print }
           ' resources/demo/changelog.md > "$RUNNER_TEMP/notes.md"
           # The section below ours is the previous release, so the changelog
-          # alone gives the compare range: no need to fetch the tags.
+          # alone gives the compare range: no need to fetch the tags. Only
+          # link the compare when that tag actually exists in this repo
+          # (a fork's first release inherits changelog sections from upstream
+          # that have no tag here; a dead compare link would be noise).
           PREVIOUS=$(awk -v v="${GITHUB_REF_NAME#v}" '
             BEGIN { target = "## v" v }
             index($0, target) == 1 { found = 1; next }
             found && /^## v/ { print substr($2, 2); exit }
           ' resources/demo/changelog.md)
-          if [ -s "$RUNNER_TEMP/notes.md" ] && [ -n "$PREVIOUS" ]; then
+          if [ -s "$RUNNER_TEMP/notes.md" ] && [ -n "$PREVIOUS" ] \
+             && git ls-remote --exit-code --tags origin "refs/tags/v$PREVIOUS" >/dev/null 2>&1; then
             printf '\n**Full Changelog**: https://github.com/%s/compare/v%s...%s\n' \
               "$GITHUB_REPOSITORY" "$PREVIOUS" "$GITHUB_REF_NAME" >> "$RUNNER_TEMP/notes.md"
           fi
