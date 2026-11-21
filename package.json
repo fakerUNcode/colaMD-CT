@@ -4,7 +4,8 @@
   "description": "ColaMD CT - ColaMD with Typora-grade image workflow, table editing and full keyboard shortcuts. Based on ColaMD (MIT) by marswave.ai.",
   "main": "dist/main/index.js",
   "author": {
-    "name": "StarlightSoar (fakerUNcode)"
+    "name": "StarlightSoar (fakerUNcode)",
+    "email": "162013739+fakerUNcode@users.noreply.github.com"
   },
   "license": "MIT",
   "homepage": "https://github.com/fakerUNcode/colaMD-CT",
