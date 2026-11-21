@@ -4,14 +4,13 @@
   "description": "ColaMD CT - ColaMD with Typora-grade image workflow, table editing and full keyboard shortcuts. Based on ColaMD (MIT) by marswave.ai.",
   "main": "dist/main/index.js",
   "author": {
-    "name": "marswave.ai",
-    "email": "hello@marswave.ai"
+    "name": "StarlightSoar (fakerUNcode)"
   },
   "license": "MIT",
-  "homepage": "https://github.com/marswaveai/colamd",
+  "homepage": "https://github.com/fakerUNcode/colaMD-CT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/marswaveai/colamd.git"
+    "url": "https://github.com/fakerUNcode/colaMD-CT.git"
   },
   "colamdct": {
     "note": "Local Typora-enhanced build of ColaMD. Keeps the ColaMD UI; adds image upload, table editing and customizable shortcuts."

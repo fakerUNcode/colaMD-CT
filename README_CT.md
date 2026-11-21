@@ -42,7 +42,7 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 
 - **zip（本机即出）**：`wsl-build.sh` 的 `mac-dist` 阶段构建**不签名** zip（含完整 .app 与 framework 符号链接），解压后右键 → 打开过一次 Gatekeeper 即可用。
 - **dmg / pkg（需要真 macOS）**：这是二进制层面的硬限制，交叉构建走不通——实测证据：dmg 底层的 dmgbuild 工具链绑定的 Python/PyObjC 是 `*-darwin.so`（Mach-O），pkg 底层的 `pkgbuild`/`productbuild` 是 macOS 专属。两条正途：
-  1. **GitHub Actions（推荐，免费）**：仓库已带 `.github/workflows/release-ct.yml`。推到你的 GitHub 后，Actions 页手动 Run workflow（或 `git tag v2.7.15 && git push --tags`），产物在 Artifacts：**dmg + pkg + zip，arm64 与 x64 各一份**（未签名）。
+  1. **GitHub Actions（推荐，免费）**：仓库已带 `.github/workflows/release.yml`，推 `v*` 标签即自动构建三平台并发布 GitHub Release：macOS 的 **dmg + pkg + zip，arm64 与 x64 各一份**（未签名），连同 Windows 安装器 / 便携 zip 与 Linux AppImage / deb 一起出现在 Releases 页；手动 Run workflow 则只构建不发版，产物在 Artifacts 里核对。
      ```bash
      git remote add origin git@github.com:<你>/colamd-ct.git
      git push -u origin main

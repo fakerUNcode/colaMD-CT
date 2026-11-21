@@ -1,5 +1,9 @@
 # ColaMD
 
+> **Note:** This repository hosts **ColaMD CT**, the community-enhanced fork of [ColaMD](https://github.com/marswaveai/colamd) (MIT, by marswave.ai). The README below is the upstream one and describes what CT inherits; what CT adds is documented in [README_CT.md](README_CT.md). License and attribution: [LICENSE](LICENSE).
+>
+> **说明**：本仓库是 [ColaMD](https://github.com/marswaveai/colamd)（MIT，marswave.ai 出品）的社区增强版 **ColaMD CT**。下方为上游官方 README，描述 CT 继承的全部功能；CT 新增的能力见 [README_CT.md](README_CT.md)。许可证与署名见 [LICENSE](LICENSE)。
+
 > A free, elegant Markdown editor anyone can pick up. No toolbars, no clutter, and the file on disk is always what you see.
 
 **Language / 语言: [English](README.md) · [中文](README_CN.md)** · [Website](https://colamd.com/)

@@ -2,7 +2,7 @@
 # ColaMD CT — 在真 macOS 上一键产出 dmg + pkg（未签名）。
 # dmg 底层的 dmgbuild 绑定 PyObjC darwin 二进制、pkg 底层的 pkgbuild 是 macOS
 # 专属，两者都无法在 Windows/WSL/Linux 上交叉构建——这是二进制层面的硬限制。
-# 在任何一台 Mac 上跑本脚本即可（或用 .github/workflows/release-ct.yml 走 CI）。
+# 在任何一台 Mac 上跑本脚本即可（或用 .github/workflows/release.yml 走 CI）。
 #
 # 用法: bash build-tools/mac-build.sh   （在仓库根目录）
 set -euo pipefail
