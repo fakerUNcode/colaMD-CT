@@ -607,9 +607,13 @@ function onCellKeydown(this: HTMLTableCellElement, event: KeyboardEvent): void {
 
 /**
  * editor.ts 的表格 mousedown 调用：点到的格子就地进入编辑。
- * 返回 false = 不是格子（比如拖列宽的把手），调用方走旧逻辑。
+ * 返回 'new' = 进入了新格子（调用方需 preventDefault，焦点由这里接管）；
+ * 'same' = 点的正是编辑中的格子（**不要** preventDefault，浏览器原生光标
+ *          放置正是我们要的——之前的 bug 就是无条件 preventDefault 把
+ *          同格二次点击挡死了，光标永远停在下第一次的位置）；
+ * false = 不是格子（比如拖列宽的把手），调用方走旧逻辑。
  */
-export function beginCellEdit(view: EditorView, widget: HTMLElement, e: MouseEvent): boolean {
+export function beginCellEdit(view: EditorView, widget: HTMLElement, e: MouseEvent): 'new' | 'same' | false {
   const target = e.target as HTMLElement
   if (target.closest('.cm-md-col-resizer')) return false
   const rowEl = target.closest('tr')
@@ -624,15 +628,15 @@ export function beginCellEdit(view: EditorView, widget: HTMLElement, e: MouseEve
   if (rowIndex < 0 || colIndex < 0) return false
   const table = widget as HTMLTableElement
 
-  // 已在编辑这一格：交给浏览器按点击位置摆光标
-  if (cellEdit && cellEdit.td === cellEl) return true
+  // 已在编辑这一格：交给浏览器按点击位置摆光标（原生行为，随点随动）
+  if (cellEdit && cellEdit.td === cellEl) return 'same'
 
   // 先结算上一格：文本有变会触发重建，用 pending（含点击坐标）把焦点与光标
   // 接到本格的新 DOM 上；没变就在下一帧直接聚焦当前表
   pendingCellFocus = { view, row: rowIndex, col: colIndex, click: { x: e.clientX, y: e.clientY } }
   commitCellEdit(null)
   if (!cellEdit) applyPendingCellFocus(table)
-  return true
+  return 'new'
 }
 
 // ─── 插入表格（网格选择器）───────────────────────────────────────────────────

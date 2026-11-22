@@ -266,8 +266,16 @@ function installEditorInteractions(root: HTMLElement, view: EditorView): void {
     if (e.button !== 0) return
     const widget = tableWidgetOf(e.target)
     if (!widget) return
-    if (beginCellEdit(view, widget, e)) {
+    const cellHit = beginCellEdit(view, widget, e)
+    if (cellHit === 'new') {
       e.preventDefault()
+      e.stopPropagation()
+      return
+    }
+    if (cellHit === 'same') {
+      // 编辑中的格子再点：preventDefault 会吞掉浏览器的原生光标放置，
+      // 光标就永远停在第一次的位置（重大 bug，2026-11-22）。只拦 CM，
+      // 原生 caret 放置照常发生。
       e.stopPropagation()
       return
     }
@@ -338,9 +346,20 @@ function installEditorInteractions(root: HTMLElement, view: EditorView): void {
       showImageInfoCard(view, widget)
       return
     }
-    // 光标放在这一段的开头，**不要**选中整段：露不露源码的判据是「有没有一个空光标落在
+    // ColaMD CT（2026-11-22）：公式点击按横向比例落进源码内部——落 `from`
+    // 的话每次都停在区间头，光标进不了公式正文（重大 bug 的另一半）。
+    // 光标落进区间后 collectMath 会显形源码，原生点击/方向键随点随动。
+    let anchor = from
+    if (widget.classList.contains('cm-md-math')) {
+      const rect = widget.getBoundingClientRect()
+      if (rect.width > 0) {
+        const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+        anchor = Math.min(to, from + Math.round(frac * (to - from)))
+      }
+    }
+    // 光标放在空档上，**不要**选中整段：露不露源码的判据是「有没有一个空光标落在
     // 这一段里」（见 live-preview 的 isBlockActive），拉出选区反而会让它继续藏着。
-    view.dispatch({ selection: { anchor: from }, scrollIntoView: true })
+    view.dispatch({ selection: { anchor }, scrollIntoView: true })
     view.focus()
   })
 }

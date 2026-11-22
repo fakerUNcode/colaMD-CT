@@ -507,9 +507,13 @@ function collectMath(
   zones: ActiveZone[],
 ): void {
   for (const range of scanMath(text, excluded)) {
-    if (range.block) zones.push({ from: range.from, to: range.to, kind: 'block' })
-    // 块公式：光标落进去就退回源码，就地改（行内公式的判据见上，保持不露）
-    if (isActiveLine(state, range.from) || (range.block && isBlockActive(state, range.from, range.to))) {
+    // ColaMD CT（2026-11-22 修重大 bug）：行内公式也注册成 zone 并在光标落进
+    // 区间时退回源码。此前行内公式「永不显形」+ 点击永远只落到区间起点，
+    // 表现为「只有第一次点击有效，之后点哪儿光标都不动」。显形后源码就是
+    // 普通文字，原生点击/方向键随便定位；光标离开区间重新渲染。zone 让
+    // activeZonesKey 在光标进出公式时变化，#201 的重算门才会放行。
+    zones.push({ from: range.from, to: range.to, kind: 'block' })
+    if (isBlockActive(state, range.from, range.to)) {
       const delim = range.block ? 2 : 1
       ranges.push({ from: range.from, to: range.from + delim, deco: MARK({ class: 'cm-md-marker' }) })
       ranges.push({ from: range.to - delim, to: range.to, deco: MARK({ class: 'cm-md-marker' }) })

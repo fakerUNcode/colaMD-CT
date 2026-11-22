@@ -356,6 +356,98 @@ async function main() {
       check('Esc/选择后菜单面板收起', (await evaluate(renderer, `!document.querySelector('.colamd-menu-panel')`)) === true)
     }
 
+    // 11) 重大 bug 回归（2026-11-22）：同格二次点击要能挪光标；
+    //     行内/块公式点击后光标落进源码、可反复进出
+    {
+      // 求值器对“找不到元素”返回字符串 'null'（真值！），这里安全解析 + 短重试
+      const geomOf = async (selectorExpr, tries = 4) => {
+        for (let i = 0; i < tries; i++) {
+          const raw = await evaluate(renderer, `(() => {
+            const el = ${selectorExpr}
+            if (!el) return 'null'
+            const r = el.getBoundingClientRect()
+            return JSON.stringify({ left: r.left, width: r.width, y: r.top + r.height / 2 })
+          })()`)
+          if (raw && raw !== 'null') return JSON.parse(raw)
+          await sleep(400)
+        }
+        return null
+      }
+
+      await setDoc(`${TABLE}\n\n尾行`)
+      await setCursor(TABLE.length + 3)
+      const tdGeom = await geomOf(`document.querySelector('.cm-md-table-widget tbody td')`)
+      if (tdGeom) {
+        const click = async (x) => {
+          for (const type of ['mousePressed', 'mouseReleased']) {
+            await renderer.send('Input.dispatchMouseEvent', { type, x, y: tdGeom.y, button: 'left', clickCount: 1 })
+          }
+          await sleep(350)
+        }
+        await click(tdGeom.left + 4)
+        const caret1 = await evaluate(renderer, `(() => {
+          const s = document.getSelection()
+          return s && s.anchorNode && s.anchorNode.parentElement?.closest('td') ? s.anchorOffset : -1
+        })()`)
+        await click(tdGeom.left + tdGeom.width * 0.9)
+        const caret2 = await evaluate(renderer, `(() => {
+          const s = document.getSelection()
+          return s && s.anchorNode && s.anchorNode.parentElement?.closest('td') ? s.anchorOffset : -1
+        })()`)
+        check('同格二次点击能挪动光标', caret1 >= 0 && caret2 >= 0 && caret2 !== caret1, `第一次 caret=${caret1}，第二次 caret=${caret2}`)
+      } else {
+        check('渲染态表格存在（用例 11 前置）', false, '找不到 td')
+      }
+
+      // 行内公式：混在文字里的 $...$ 才是行内（$...$ 单独成行会被 scanMath 判成块公式）
+      // 公式区间 3..10。点击 → 显形源码 + 光标按比例落进区间；移出 → 复渲染；再点 → 再显形
+      await setDoc('文字 $a+b+c$ 收尾\n\n尾行')
+      await setCursor(13)
+      const inlineGeom = await geomOf(`document.querySelector('.cm-md-math-inline')`)
+      check('行内公式渲染出来了', !!inlineGeom)
+      if (inlineGeom) {
+        const g = inlineGeom
+        const clickMath = async (x) => {
+          for (const type of ['mousePressed', 'mouseReleased']) {
+            await renderer.send('Input.dispatchMouseEvent', { type, x, y: g.y, button: 'left', clickCount: 1 })
+          }
+          await sleep(350)
+        }
+        const mathState = () => evaluate(renderer, `(() => ({
+          widget: !!document.querySelector('.cm-md-math-inline'),
+          head: ${VIEW}.state.selection.main.head,
+          len: ${VIEW}.state.doc.length
+        }))()`)
+        await clickMath(g.left + g.width * 0.8)
+        const s1 = await mathState()
+        check('第一次点行内公式：源码显形（widget 消失）', s1.widget === false, JSON.stringify(s1))
+        check('第一次点行内公式：光标落进区间（右侧）', s1.head >= 8 && s1.head <= 10, `head=${s1.head}`)
+        await setCursor(13)
+        await sleep(350)
+        const s2 = await mathState()
+        check('光标移出后公式复渲染', s2.widget === true, JSON.stringify(s2))
+        await clickMath(g.left + g.width * 0.2)
+        const s3 = await mathState()
+        check('第二次点行内公式：再次显形', s3.widget === false, JSON.stringify(s3))
+        check('第二次点击光标落在左侧（按比例）', s3.head >= 3 && s3.head <= 6, `head=${s3.head}`)
+      }
+
+      // 块公式：点击 → 显形 + 光标进块；再点复现
+      await setDoc('$$\nE = mc^2\n$$\n\n尾行')
+      await setCursor(17)
+      const blockGeom = await geomOf(`document.querySelector('.cm-md-math-block')`)
+      check('块公式渲染出来了', !!blockGeom)
+      if (blockGeom) {
+        const g = blockGeom
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await renderer.send('Input.dispatchMouseEvent', { type, x: g.left + g.width / 2, y: g.y, button: 'left', clickCount: 1 })
+        }
+        await sleep(350)
+        const s1 = await evaluate(renderer, `(() => ({ widget: !!document.querySelector('.cm-md-math-block'), head: ${VIEW}.state.selection.main.head }))()`)
+        check('点块公式：退回源码且光标进块', s1.widget === false && s1.head >= 0 && s1.head <= 12, JSON.stringify(s1))
+      }
+    }
+
     reportChecks()
   } finally {
     stopVerifyApp(udd)

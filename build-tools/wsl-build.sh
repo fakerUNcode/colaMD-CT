@@ -56,9 +56,18 @@ setup() {
 }
 
 build_linux() {
+  # 与 mac 同一招：electron-builder 自带下载器常被 CDN 掐断（ECONNRESET），
+  # 用 Windows 侧 curl 下载好的 linux electron zip，解压后 electronDist 指进去。
   cd "$PROJ"
+  DIST=$HOME/electron-dist-linux
+  ZIP_WIN=$PROJ_WIN/build-tools/electron-v44.3.0-linux-x64.zip
+  if [ ! -x "$DIST/electron" ]; then
+    rm -rf "$DIST"
+    python3 "$PROJ_WIN/build-tools/unzip-symlinks.py" "$ZIP_WIN" "$DIST"
+  fi
+  ls "$DIST" >/dev/null
   npx electron-vite build
-  npx electron-builder --linux AppImage deb --publish never
+  npx electron-builder --linux AppImage deb --config.electronDist="$DIST" --publish never
   ls -la release/*.AppImage release/*.deb
   cp release/*.AppImage release/*.deb "$PROJ_WIN/release/" 2>/dev/null || true
   echo "LINUX_OK"
