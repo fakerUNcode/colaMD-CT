@@ -1,30 +1,60 @@
-// ColaMD CT：偏好设置弹窗（图片 / 快捷键 两页签）。
+// ColaMD CT：偏好设置弹窗。
 //
-// 结构沿用编辑器字体弹窗（font-settings.ts）的 math-modal 骨架：DOM 拼装、
-// 不引框架。保存 = 一次 settings:update 局部合并，主进程落盘、重建菜单、
-// 广播 settings:changed；本窗口的键盘映射立即热更新，别的窗口靠广播跟进。
+// 完整版：左侧分栏导航（编辑器 / Markdown / 图片 / 表格 / 快捷键），
+// 右侧是当前分区的表单。两类保存语义——
+//   即时生效：Markdown 方言、表格、编辑器里的视图项（改一下立刻看得见，
+//             经 settings:update → 主进程广播 settings:changed → 应用）
+//   显式保存：图床凭据与快捷键改绑（敲到一半不能半截生效），底部 保存/取消。
+// 骨架沿用编辑器字体弹窗（font-settings.ts）的 math-modal 体系，配色全部走主题变量。
 
 import { EDITOR_COMMANDS, isValidAccelerator, type EditorCommandSpec } from '../shared/commands'
-import type { AppSettings, ImageSettings } from '../shared/settings-types'
+import type { AppSettings, ImageSettings, MarkdownDialectSettings, TableSettings } from '../shared/settings-types'
 import { applyKeybindings } from './editor/keymap-config'
 import { isChinese } from './ui-language'
 
-type Tab = 'image' | 'keys'
+type Section = 'editor' | 'markdown' | 'image' | 'table' | 'keys'
 
 export async function showPreferences(): Promise<void> {
   const settings = await window.electronAPI?.getSettings()
   if (!settings) return
 
-  // 工作副本：取消 = 全部丢弃；快捷键页只存「与默认不同的覆盖」
+  // 显式保存的工作副本：图床 + 快捷键（改绑）
   const image: ImageSettings = structuredClone(settings.image)
   const overrides = new Map<string, string>(Object.entries(structuredClone(settings.keybindings)))
-  let activeTab: Tab = 'image'
+  // 即时生效工作副本：方言 + 表格（toggle 一下就 settings:update）
+  const markdown: MarkdownDialectSettings = { ...settings.markdown }
+  const table: TableSettings = { ...settings.table }
+  let active: Section = 'editor'
 
   const zh = isChinese()
   const t = {
     title: zh ? '偏好设置' : 'Preferences',
-    tabImage: zh ? '图片' : 'Images',
-    tabKeys: zh ? '快捷键' : 'Shortcuts',
+    sections: {
+      editor: zh ? '编辑器' : 'Editor',
+      markdown: 'Markdown',
+      image: zh ? '图片' : 'Images',
+      table: zh ? '表格' : 'Tables',
+      keys: zh ? '快捷键' : 'Shortcuts',
+    },
+    // 编辑器
+    language: zh ? '界面语言' : 'Language',
+    panelSide: zh ? '文件面板位置' : 'File panel position',
+    left: zh ? '左侧' : 'Left',
+    right: zh ? '右侧' : 'Right',
+    pageWidth: zh ? '正文宽度' : 'Text width',
+    narrow: zh ? '窄' : 'Narrow',
+    standard: zh ? '标准' : 'Standard',
+    wide: zh ? '宽' : 'Wide',
+    restore: zh ? '启动时打开上次文档' : 'Reopen last document at launch',
+    viewHint: zh ? '视图类设置即时生效' : 'View settings apply instantly',
+    // Markdown
+    looseEmphasis: zh ? '宽松强调（中文标点友好）' : 'Loose emphasis (CJK punctuation)',
+    looseHint: zh ? '严格 CommonMark 会把 `**加粗**。`、`（**粗**）` 判成普通文字（全角标点挡住闭合）。开启后补画这类被拒掉的加粗、斜体、删除线；空格侧仍从严。' : 'Strict CommonMark rejects emphasis adjacent to punctuation. On = render it anyway.',
+    inlineMath: zh ? '行内公式 $…$' : 'Inline math $…$',
+    inlineMathHint: zh ? '关闭后 `$` 是普通字符；块级 `$$…$$` 不受影响。' : 'Off = literal `$`; block `$$…$$` unaffected.',
+    highlight: zh ? '高亮 ==文字==' : 'Highlight ==text==',
+    markdownHint: zh ? '改动即时生效并写入本机设置' : 'Applies instantly and is saved locally',
+    // 图片（沿用原文案）
     behavior: zh ? '插入图片时（粘贴 / 拖拽）' : 'When inserting images (paste / drop)',
     ask: zh ? '每次询问' : 'Ask every time',
     upload: zh ? '上传到图床' : 'Upload to image host',
@@ -46,73 +76,97 @@ export async function showPreferences(): Promise<void> {
     customField: zh ? '文件字段名' : 'File field name',
     customHeaders: zh ? '额外请求头（JSON）' : 'Extra headers (JSON)',
     customRespPath: zh ? '响应 URL 路径（如 data.url，留空自动猜）' : 'Response URL path (e.g. data.url; empty = auto)',
+    imageHint: zh ? '「上传」用到的服务；凭据只存本机' : 'Used by Upload; credentials stay local',
+    // 表格
+    rememberWidths: zh ? '记住表格列宽' : 'Remember table column widths',
+    widthsHint: zh ? '列宽按文档存放在本机（不写进 md 文件）。关闭后列宽不再随文档恢复。' : 'Stored locally per document, never inside the .md file.',
+    tableHint: zh ? '改动即时生效' : 'Applies instantly',
+    // 快捷键
     keysHint: zh ? '点击按键重新绑定；Backspace 解绑；Esc 取消' : 'Click a binding to rebind; Backspace unbinds; Esc cancels',
-    conflict: zh ? '冲突' : 'conflict',
     unbound: zh ? '未绑定' : 'none',
     resetAll: zh ? '全部恢复默认' : 'Reset all',
     cancel: zh ? '取消' : 'Cancel',
-    save: zh ? '保存' : 'Save',
+    save: zh ? '保存图片与快捷键' : 'Save images & shortcuts',
   }
 
   const overlay = document.createElement('div')
   overlay.className = 'math-modal-overlay'
   const modal = document.createElement('div')
-  modal.className = 'math-modal colamd-pref-modal'
+  modal.className = 'math-modal colamd-pref-modal colamd-pref-full'
 
   const header = document.createElement('h3')
   header.textContent = t.title
 
-  const tabs = document.createElement('div')
-  tabs.className = 'colamd-pref-tabs'
-  const tabImage = document.createElement('button')
-  tabImage.className = 'colamd-pref-tab'
-  tabImage.textContent = t.tabImage
-  const tabKeys = document.createElement('button')
-  tabKeys.className = 'colamd-pref-tab'
-  tabKeys.textContent = t.tabKeys
-  tabs.append(tabImage, tabKeys)
+  // ── 布局：侧边导航 + 内容区 ──
+  const layout = document.createElement('div')
+  layout.className = 'colamd-pref-layout'
+  const nav = document.createElement('nav')
+  nav.className = 'colamd-pref-nav'
+  const content = document.createElement('div')
+  content.className = 'colamd-pref-content'
 
-  const body = document.createElement('div')
-  body.className = 'colamd-pref-body'
+  const panes: Record<Section, HTMLDivElement> = {
+    editor: document.createElement('div'),
+    markdown: document.createElement('div'),
+    image: document.createElement('div'),
+    table: document.createElement('div'),
+    keys: document.createElement('div'),
+  }
+  for (const [key, pane] of Object.entries(panes)) {
+    pane.className = 'colamd-pref-pane'
+    content.appendChild(pane)
+  }
 
-  // ─── 图片页 ────────────────────────────────────────────────────────────────
+  const navButtons = new Map<Section, HTMLButtonElement>()
+  for (const key of ['editor', 'markdown', 'image', 'table', 'keys'] as Section[]) {
+    const item = document.createElement('button')
+    item.type = 'button'
+    item.className = 'colamd-pref-nav-item'
+    item.textContent = t.sections[key]
+    item.addEventListener('click', () => activate(key))
+    nav.appendChild(item)
+    navButtons.set(key, item)
+  }
+  function activate(section: Section): void {
+    active = section
+    for (const [key, pane] of Object.entries(panes)) {
+      pane.style.display = key === section ? 'flex' : 'none'
+    }
+    navButtons.forEach((button, key) => button.classList.toggle('active', key === section))
+  }
 
-  const imagePage = document.createElement('div')
-  imagePage.style.display = 'flex'
-  imagePage.style.flexDirection = 'column'
-  imagePage.style.gap = '12px'
+  layout.append(nav, content)
 
-  /** 功能分区标题：把一长溜表单切成「行为 → 图床 → 本地副本」三块。 */
-  const section = (title: string, hint?: string): HTMLDivElement => {
-    const wrap = document.createElement('div')
-    wrap.className = 'colamd-pref-section'
+  // ── 通用小部件 ──
+  const sectionCard = (parent: HTMLElement, title: string, hint?: string): HTMLDivElement => {
+    const card = document.createElement('div')
+    card.className = 'colamd-pref-section'
     const head = document.createElement('div')
     head.className = 'colamd-pref-section-title'
     head.textContent = title
-    wrap.appendChild(head)
+    card.appendChild(head)
     if (hint) {
       const hintEl = document.createElement('div')
       hintEl.className = 'colamd-pref-hint'
       hintEl.textContent = hint
-      wrap.appendChild(hintEl)
+      card.appendChild(hintEl)
     }
     const body = document.createElement('div')
     body.className = 'colamd-pref-section-body'
-    wrap.appendChild(body)
-    imagePage.appendChild(wrap)
+    card.appendChild(body)
+    parent.appendChild(card)
     return body
   }
-  const row = (label: string): { wrap: HTMLDivElement; content: HTMLDivElement } => {
+  const rowOf = (parent: HTMLElement, label: string): HTMLDivElement => {
     const wrap = document.createElement('div')
     wrap.className = 'colamd-pref-row'
     const lab = document.createElement('label')
     lab.textContent = label
     wrap.append(lab)
-    const content = document.createElement('div')
-    wrap.appendChild(content)
-    return { wrap, content }
+    parent.appendChild(wrap)
+    return wrap
   }
-  const input = (value: string, placeholder = '', type = 'text'): HTMLInputElement => {
+  const inputOf = (value: string, placeholder = '', type = 'text'): HTMLInputElement => {
     const el = document.createElement('input')
     el.className = 'colamd-pref-input'
     el.type = type
@@ -121,293 +175,322 @@ export async function showPreferences(): Promise<void> {
     el.autocomplete = 'off'
     return el
   }
-
-  // ── 分区一：插入行为 ──
-  const behaviorSection = section(zh ? '插入行为' : 'Insert behavior', zh ? '粘贴 / 拖入图片时怎么处理' : 'What happens on paste / drop')
-  const behaviorRow = row(t.behavior)
-  const behaviorSelect = document.createElement('select')
-  behaviorSelect.className = 'colamd-pref-select'
-  for (const [value, label] of [['ask', t.ask], ['upload', t.upload], ['copy', t.copy], ['reference', t.reference]] as const) {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = label
-    behaviorSelect.appendChild(option)
+  const selectOf = (options: [string, string][], value: string): HTMLSelectElement => {
+    const el = document.createElement('select')
+    el.className = 'colamd-pref-select'
+    for (const [v, label] of options) {
+      const option = document.createElement('option')
+      option.value = v
+      option.textContent = label
+      el.appendChild(option)
+    }
+    el.value = value
+    return el
   }
-  behaviorSelect.value = image.insertBehavior
-  behaviorSelect.addEventListener('change', () => { image.insertBehavior = behaviorSelect.value as ImageSettings['insertBehavior'] })
-  behaviorRow.content.appendChild(behaviorSelect)
-  behaviorSection.appendChild(behaviorRow.wrap)
-
-  // ── 分区二：图床服务（仅「上传」行为用到）──
-  const providerSection = section(zh ? '图床服务' : 'Image host', zh ? '「上传到图床」用哪个服务；凭据只存本机' : 'Used by Upload; credentials stay local')
-  const providerRow = row(t.provider)
-  const providerSelect = document.createElement('select')
-  providerSelect.className = 'colamd-pref-select'
-  for (const [value, label] of [['picgo', 'PicGo'], ['github', 'GitHub'], ['smms', 'SM.MS'], ['custom', zh ? '自定义' : 'Custom']] as const) {
-    const option = document.createElement('option')
-    option.value = value
-    option.textContent = label
-    providerSelect.appendChild(option)
+  /** 开关行：点击即刻 settings:update（主进程广播回来由外壳应用）。 */
+  const toggleOf = (parent: HTMLElement, label: string, hint: string, value: boolean, onChange: (next: boolean) => void): void => {
+    const row = document.createElement('div')
+    row.className = 'colamd-pref-toggle'
+    const text = document.createElement('div')
+    text.className = 'colamd-pref-toggle-text'
+    const name = document.createElement('div')
+    name.className = 'colamd-pref-toggle-name'
+    name.textContent = label
+    const hintEl = document.createElement('div')
+    hintEl.className = 'colamd-pref-hint'
+    hintEl.textContent = hint
+    text.append(name, hintEl)
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    box.checked = value
+    box.className = 'colamd-pref-switch'
+    box.addEventListener('change', () => onChange(box.checked))
+    row.append(text, box)
+    parent.appendChild(row)
   }
-  providerSelect.value = image.uploadProvider
-  providerSelect.addEventListener('change', () => { image.uploadProvider = providerSelect.value as ImageSettings['uploadProvider']; renderProviderFields() })
-  providerRow.content.appendChild(providerSelect)
-  providerSection.appendChild(providerRow.wrap)
+
+  // ════════ 分区一：编辑器（视图类，即时生效） ════════
+  {
+    const body = sectionCard(panes.editor, t.sections.editor, t.viewHint)
+    const langRow = rowOf(body, t.language)
+    const langSel = selectOf([['zh', '中文'], ['en', 'English']], isChinese() ? 'zh' : 'en')
+    langSel.addEventListener('change', () => void window.electronAPI?.setLanguage(langSel.value as 'zh' | 'en'))
+    langRow.appendChild(langSel)
+
+    const sideRow = rowOf(body, t.panelSide)
+    const sideSel = selectOf([['right', t.right], ['left', t.left]], localStorage.getItem('colamd-panel-side') || 'right')
+    sideSel.addEventListener('change', () => void window.electronAPI?.appMenuAction('set-panel-side', sideSel.value))
+    sideRow.appendChild(sideSel)
+
+    const widthRow = rowOf(body, t.pageWidth)
+    const widthSel = selectOf([['narrow', t.narrow], ['standard', t.standard], ['wide', t.wide]], localStorage.getItem('colamd-page-width') || 'standard')
+    widthSel.addEventListener('change', () => void window.electronAPI?.appMenuAction('set-page-width', widthSel.value))
+    widthRow.appendChild(widthSel)
+
+    const restoreBody = sectionCard(panes.editor, zh ? '启动' : 'Startup')
+    void window.electronAPI?.getRestoreOnLaunch().then((on) => {
+      toggleOf(restoreBody, t.restore, '', on, (next) => void window.electronAPI?.setRestoreOnLaunch(next))
+    })
+  }
+
+  // ════════ 分区二：Markdown 方言（即时生效） ════════
+  {
+    const body = sectionCard(panes.markdown, t.sections.markdown, t.markdownHint)
+    const persist = () => void window.electronAPI?.updateSettings({ markdown: { ...markdown } })
+    toggleOf(body, t.looseEmphasis, t.looseHint, markdown.looseEmphasis, (next) => { markdown.looseEmphasis = next; persist() })
+    toggleOf(body, t.inlineMath, t.inlineMathHint, markdown.inlineMath, (next) => { markdown.inlineMath = next; persist() })
+    toggleOf(body, t.highlight, '', markdown.highlight, (next) => { markdown.highlight = next; persist() })
+  }
+
+  // ════════ 分区三：图片（显式保存） ════════
   const providerFields = document.createElement('div')
-  providerFields.style.display = 'flex'
-  providerFields.style.flexDirection = 'column'
-  providerFields.style.gap = '12px'
-  providerSection.appendChild(providerFields)
+  {
+    const behaviorBody = sectionCard(panes.image, t.behavior)
+    const behaviorRow = rowOf(behaviorBody, t.behavior)
+    const behaviorSel = selectOf(
+      [['ask', t.ask], ['upload', t.upload], ['copy', t.copy], ['reference', t.reference]] as [string, string][],
+      image.insertBehavior,
+    )
+    behaviorSel.addEventListener('change', () => { image.insertBehavior = behaviorSel.value as ImageSettings['insertBehavior'] })
+    behaviorRow.appendChild(behaviorSel)
 
-  function renderProviderFields(): void {
-    providerFields.replaceChildren()
-    const provider = image.uploadProvider
-    if (provider === 'picgo') {
-      const r = row(t.picgoUrl)
-      const el = input(image.picgo.url, 'http://127.0.0.1:36677/upload')
-      el.addEventListener('input', () => { image.picgo.url = el.value })
-      r.content.appendChild(el)
-      providerFields.appendChild(r.wrap)
-    } else if (provider === 'github') {
-      const token = input(image.github.token, 'ghp_… / github_pat_…', 'password')
-      token.addEventListener('input', () => { image.github.token = token.value })
-      const owner = input(image.github.owner)
-      owner.addEventListener('input', () => { image.github.owner = owner.value })
-      const repo = input(image.github.repo)
-      repo.addEventListener('input', () => { image.github.repo = repo.value })
-      const branch = input(image.github.branch, 'main')
-      branch.addEventListener('input', () => { image.github.branch = branch.value })
-      const path = input(image.github.path, 'images')
-      path.addEventListener('input', () => { image.github.path = path.value })
-      const cdnRow = document.createElement('label')
-      cdnRow.className = 'colamd-pref-remember'
-      const cdn = document.createElement('input')
-      cdn.type = 'checkbox'
-      cdn.checked = image.github.useJsDelivr
-      cdn.addEventListener('change', () => { image.github.useJsDelivr = cdn.checked })
-      cdnRow.append(cdn, document.createTextNode(t.jsDelivr))
-      for (const [label, el] of [[t.githubToken, token], [t.githubOwner, owner], [t.githubRepo, repo], [t.githubBranch, branch], [t.githubPath, path]] as const) {
-        const r = row(label)
-        r.content.appendChild(el)
-        providerFields.appendChild(r.wrap)
+    const providerBody = sectionCard(panes.image, t.sections.image, t.imageHint)
+    const providerRow = rowOf(providerBody, t.provider)
+    const providerSel = selectOf(
+      [['picgo', 'PicGo'], ['github', 'GitHub'], ['smms', 'SM.MS'], ['custom', zh ? '自定义' : 'Custom']] as [string, string][],
+      image.uploadProvider,
+    )
+    providerSel.addEventListener('change', () => { image.uploadProvider = providerSel.value as ImageSettings['uploadProvider']; renderProviderFields() })
+    providerRow.appendChild(providerSel)
+    providerFields.style.display = 'flex'
+    providerFields.style.flexDirection = 'column'
+    providerFields.style.gap = '12px'
+    providerBody.appendChild(providerFields)
+
+    function renderProviderFields(): void {
+      providerFields.replaceChildren()
+      const provider = image.uploadProvider
+      if (provider === 'picgo') {
+        const r = rowOf(providerFields, t.picgoUrl)
+        const el = inputOf(image.picgo.url, 'http://127.0.0.1:36677/upload')
+        el.addEventListener('input', () => { image.picgo.url = el.value })
+        r.appendChild(el)
+      } else if (provider === 'github') {
+        const token = inputOf(image.github.token, 'ghp_… / github_pat_…', 'password')
+        token.addEventListener('input', () => { image.github.token = token.value })
+        const owner = inputOf(image.github.owner)
+        owner.addEventListener('input', () => { image.github.owner = owner.value })
+        const repo = inputOf(image.github.repo)
+        repo.addEventListener('input', () => { image.github.repo = repo.value })
+        const branch = inputOf(image.github.branch, 'main')
+        branch.addEventListener('input', () => { image.github.branch = branch.value })
+        const path = inputOf(image.github.path, 'images')
+        path.addEventListener('input', () => { image.github.path = path.value })
+        const cdnRow = document.createElement('label')
+        cdnRow.className = 'colamd-pref-toggle'
+        const cdnText = document.createElement('div')
+        cdnText.className = 'colamd-pref-toggle-name'
+        cdnText.textContent = t.jsDelivr
+        const cdn = document.createElement('input')
+        cdn.type = 'checkbox'
+        cdn.className = 'colamd-pref-switch'
+        cdn.checked = image.github.useJsDelivr
+        cdn.addEventListener('change', () => { image.github.useJsDelivr = cdn.checked })
+        cdnRow.append(cdnText, cdn)
+        for (const [label, el] of [[t.githubToken, token], [t.githubOwner, owner], [t.githubRepo, repo], [t.githubBranch, branch], [t.githubPath, path]] as const) {
+          rowOf(providerFields, label).appendChild(el)
+        }
+        providerFields.appendChild(cdnRow)
+      } else if (provider === 'smms') {
+        const r = rowOf(providerFields, t.smmsToken)
+        const el = inputOf(image.smms.token, '', 'password')
+        el.addEventListener('input', () => { image.smms.token = el.value })
+        r.appendChild(el)
+      } else {
+        const url = inputOf(image.custom.url, 'https://…')
+        url.addEventListener('input', () => { image.custom.url = url.value })
+        const field = inputOf(image.custom.fieldName, 'image')
+        field.addEventListener('input', () => { image.custom.fieldName = field.value })
+        const headers = inputOf(JSON.stringify(image.custom.headers ?? {}), '{"Authorization": "…"}')
+        headers.dataset.role = 'headers'
+        const respPath = inputOf(image.custom.responsePath, 'data.url')
+        respPath.addEventListener('input', () => { image.custom.responsePath = respPath.value })
+        for (const [label, el] of [[t.customUrl, url], [t.customField, field], [t.customHeaders, headers], [t.customRespPath, respPath]] as const) {
+          rowOf(providerFields, label).appendChild(el)
+        }
       }
-      providerFields.appendChild(cdnRow)
-    } else if (provider === 'smms') {
-      const r = row(t.smmsToken)
-      const el = input(image.smms.token, '', 'password')
-      el.addEventListener('input', () => { image.smms.token = el.value })
-      r.content.appendChild(el)
-      providerFields.appendChild(r.wrap)
-    } else {
-      const url = input(image.custom.url, 'https://…')
-      url.addEventListener('input', () => { image.custom.url = url.value })
-      const field = input(image.custom.fieldName, 'image')
-      field.addEventListener('input', () => { image.custom.fieldName = field.value })
-      const headers = input(JSON.stringify(image.custom.headers ?? {}), '{"Authorization": "…"}')
-      headers.dataset.role = 'headers'
-      const respPath = input(image.custom.responsePath, 'data.url')
-      respPath.addEventListener('input', () => { image.custom.responsePath = respPath.value })
-      for (const [label, el] of [[t.customUrl, url], [t.customField, field], [t.customHeaders, headers], [t.customRespPath, respPath]] as const) {
-        const r = row(label)
-        r.content.appendChild(el)
-        providerFields.appendChild(r.wrap)
+    }
+    renderProviderFields()
+
+    const localBody = sectionCard(panes.image, zh ? '本地副本与命名' : 'Local copies & naming')
+    const copyDirRow = rowOf(localBody, t.copyDir)
+    const copyDirInput = inputOf(image.copyDir, 'assets')
+    copyDirInput.addEventListener('input', () => { image.copyDir = copyDirInput.value })
+    copyDirRow.appendChild(copyDirInput)
+    const patternRow = rowOf(localBody, t.namePattern)
+    const patternInput = inputOf(image.namePattern, '{name}-{hash}')
+    patternInput.addEventListener('input', () => { image.namePattern = patternInput.value })
+    const patternHint = document.createElement('div')
+    patternHint.className = 'colamd-pref-hint'
+    patternHint.textContent = t.patternHint
+    patternRow.append(patternInput, patternHint)
+  }
+
+  // ════════ 分区四：表格（即时生效） ════════
+  {
+    const body = sectionCard(panes.table, t.sections.table, t.tableHint)
+    const persist = () => void window.electronAPI?.updateSettings({ table: { ...table } })
+    toggleOf(body, t.rememberWidths, t.widthsHint, table.rememberWidths, (next) => { table.rememberWidths = next; persist() })
+  }
+
+  // ════════ 分区五：快捷键（显式保存） ════════
+  {
+    const body = sectionCard(panes.keys, t.sections.keys === 'Markdown' ? 'Shortcuts' : t.sections.keys, t.keysHint)
+    const keysList = document.createElement('div')
+    keysList.className = 'colamd-pref-keys'
+    body.appendChild(keysList)
+
+    const GROUP_LABELS: Record<string, string> = {
+      inline: zh ? '行内格式' : 'Inline',
+      heading: zh ? '标题' : 'Headings',
+      list: zh ? '列表' : 'Lists',
+      block: zh ? '块级' : 'Blocks',
+      insert: zh ? '插入' : 'Insert',
+    }
+    const GROUP_ORDER = ['inline', 'heading', 'list', 'block', 'insert'] as const
+
+    const bindingButtons = new Map<string, HTMLButtonElement>()
+    let capturingId: string | null = null
+
+    const effective = (): Record<string, string> => {
+      const merged: Record<string, string> = {}
+      for (const command of EDITOR_COMMANDS) merged[command.id] = command.accelerator
+      for (const [id, value] of overrides) if (value !== undefined) merged[id] = value
+      return merged
+    }
+    const displayOf = (command: EditorCommandSpec): string => {
+      const value = overrides.has(command.id) ? overrides.get(command.id) as string : command.accelerator
+      return value === '' ? t.unbound : value
+    }
+    const markConflicts = (): void => {
+      const current = effective()
+      const seen = new Map<string, number>()
+      for (const value of Object.values(current)) {
+        if (!value) continue
+        seen.set(value, (seen.get(value) ?? 0) + 1)
+      }
+      for (const [id, button] of bindingButtons) {
+        button.classList.toggle('conflict', !!current[id] && (seen.get(current[id]) ?? 0) > 1)
+        button.classList.toggle('capturing', capturingId === id)
       }
     }
-  }
-  renderProviderFields()
-
-  // ── 分区三：本地副本与命名 ──
-  const localSection = section(zh ? '本地副本与命名' : 'Local copies & naming', zh ? '「复制到文档目录」和「上传失败降级」的落盘规则' : 'Where Copy-to-folder and upload fallback write files')
-  const copyDirRow = row(t.copyDir)
-  const copyDirInput = input(image.copyDir, 'assets')
-  copyDirInput.addEventListener('input', () => { image.copyDir = copyDirInput.value })
-  copyDirRow.content.appendChild(copyDirInput)
-  localSection.appendChild(copyDirRow.wrap)
-
-  const patternRow = row(t.namePattern)
-  const patternInput = input(image.namePattern, '{name}-{hash}')
-  patternInput.addEventListener('input', () => { image.namePattern = patternInput.value })
-  const patternHint = document.createElement('div')
-  patternHint.className = 'colamd-pref-hint'
-  patternHint.textContent = t.patternHint
-  patternRow.content.append(patternInput, patternHint)
-  localSection.appendChild(patternRow.wrap)
-
-  // ─── 快捷键页 ──────────────────────────────────────────────────────────────
-
-  const keysPage = document.createElement('div')
-  keysPage.style.display = 'none'
-  keysPage.style.flexDirection = 'column'
-  const keysHint = document.createElement('div')
-  keysHint.className = 'colamd-pref-hint'
-  keysHint.textContent = t.keysHint
-  const keysList = document.createElement('div')
-  keysList.className = 'colamd-pref-keys'
-  keysPage.append(keysHint, keysList)
-
-  const GROUP_LABELS: Record<string, string> = {
-    inline: zh ? '行内格式' : 'Inline',
-    heading: zh ? '标题' : 'Headings',
-    list: zh ? '列表' : 'Lists',
-    block: zh ? '块级' : 'Blocks',
-    insert: zh ? '插入' : 'Insert',
-  }
-  const GROUP_ORDER = ['inline', 'heading', 'list', 'block', 'insert'] as const
-
-  const bindingButtons = new Map<string, HTMLButtonElement>()
-  let capturingId: string | null = null
-
-  const effective = (): Record<string, string> => {
-    const merged: Record<string, string> = {}
-    for (const command of EDITOR_COMMANDS) {
-      merged[command.id] = overrides.has(command.id) ? (overrides.get(command.id) as string) : command.accelerator
+    const acceleratorFromEvent = (event: KeyboardEvent): string | null => {
+      const hasCtrl = event.ctrlKey || event.metaKey
+      const hasAlt = event.altKey
+      if (!hasCtrl && !hasAlt) return null
+      const code = event.code
+      if (/^Key[A-Z]$/.test(code)) return code.slice(3)
+      if (/^Digit\d$/.test(code)) return code.slice(5)
+      const named: Record<string, string> = {
+        Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
+        Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: "'",
+      }
+      if (code in named) return named[code]
+      if (/^F\d{1,2}$/.test(code)) return code
+      return event.key.length === 1 ? event.key : null
     }
-    return merged
-  }
 
-  function displayOf(command: EditorCommandSpec): string {
-    const value = overrides.has(command.id) ? overrides.get(command.id) as string : command.accelerator
-    return value === '' ? t.unbound : value
-    // 展示用 accelerator 原文；平台化显示（⌘/Ctrl）交给 accelerator 本身（CmdOrCtrl）
-  }
-
-  function markConflicts(): void {
-    const current = effective()
-    const seen = new Map<string, number>()
-    for (const value of Object.values(current)) {
-      if (!value) continue
-      seen.set(value, (seen.get(value) ?? 0) + 1)
-    }
-    for (const [id, button] of bindingButtons) {
-      const value = current[id] ?? ''
-      button.classList.toggle('conflict', !!value && (seen.get(value) ?? 0) > 1)
-      button.classList.toggle('capturing', capturingId === id)
-    }
-  }
-
-  function acceleratorFromEvent(event: KeyboardEvent): string | null {
-    const hasCtrl = event.ctrlKey || event.metaKey
-    const hasAlt = event.altKey
-    if (!hasCtrl && !hasAlt) return null
-    const key = physicalKey(event)
-    if (!key) return null
-    const mods: string[] = []
-    if (hasCtrl) mods.push('CmdOrCtrl')
-    if (event.shiftKey) mods.push('Shift')
-    if (hasAlt) mods.push('Alt')
-    return [...mods, key.toUpperCase()].join('+')
-  }
-
-  function physicalKey(event: KeyboardEvent): string | null {
-    const code = event.code
-    if (/^Key[A-Z]$/.test(code)) return code.slice(3)
-    if (/^Digit\d$/.test(code)) return code.slice(5)
-    const named: Record<string, string> = {
-      Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
-      Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: "'",
-    }
-    if (code in named) return named[code]
-    if (/^F\d{1,2}$/.test(code)) return code
-    return event.key.length === 1 ? event.key : null
-  }
-
-  function renderKeys(): void {
-    keysList.replaceChildren()
-    bindingButtons.clear()
-    for (const group of GROUP_ORDER) {
-      const groupLabel = document.createElement('div')
-      groupLabel.className = 'colamd-pref-key-group'
-      groupLabel.textContent = GROUP_LABELS[group]
-      keysList.appendChild(groupLabel)
-      for (const command of EDITOR_COMMANDS) {
-        if (command.group !== group) continue
-        const keyRow = document.createElement('div')
-        keyRow.className = 'colamd-pref-key-row'
-        const name = document.createElement('span')
-        name.className = 'colamd-pref-key-name'
-        name.textContent = zh ? command.zh : command.en
-        const binding = document.createElement('button')
-        binding.className = 'colamd-pref-key-binding'
-        binding.textContent = displayOf(command)
-        binding.addEventListener('click', () => {
-          capturingId = command.id
-          binding.textContent = zh ? '按下新组合…' : 'Press keys…'
-          markConflicts()
-        })
-        bindingButtons.set(command.id, binding)
-        const reset = document.createElement('button')
-        reset.className = 'colamd-pref-key-reset'
-        reset.textContent = '↺'
-        reset.title = zh ? '恢复默认' : 'Reset'
-        reset.addEventListener('click', () => {
-          overrides.delete(command.id)
+    const renderKeys = (): void => {
+      keysList.replaceChildren()
+      bindingButtons.clear()
+      for (const group of GROUP_ORDER) {
+        const groupLabel = document.createElement('div')
+        groupLabel.className = 'colamd-pref-key-group'
+        groupLabel.textContent = GROUP_LABELS[group]
+        keysList.appendChild(groupLabel)
+        for (const command of EDITOR_COMMANDS) {
+          if (command.group !== group) continue
+          const keyRow = document.createElement('div')
+          keyRow.className = 'colamd-pref-key-row'
+          const name = document.createElement('span')
+          name.className = 'colamd-pref-key-name'
+          name.textContent = zh ? command.zh : command.en
+          const binding = document.createElement('button')
+          binding.className = 'colamd-pref-key-binding'
           binding.textContent = displayOf(command)
-          markConflicts()
-        })
-        keyRow.append(name, binding, reset)
-        keysList.appendChild(keyRow)
+          binding.addEventListener('click', () => {
+            capturingId = command.id
+            binding.textContent = zh ? '按下新组合…' : 'Press keys…'
+            markConflicts()
+          })
+          bindingButtons.set(command.id, binding)
+          const reset = document.createElement('button')
+          reset.className = 'colamd-pref-key-reset'
+          reset.textContent = '↺'
+          reset.title = zh ? '恢复默认' : 'Reset'
+          reset.addEventListener('click', () => {
+            overrides.delete(command.id)
+            binding.textContent = displayOf(command)
+            markConflicts()
+          })
+          keyRow.append(name, binding, reset)
+          keysList.appendChild(keyRow)
+        }
       }
+      markConflicts()
     }
-    markConflicts()
-  }
 
-  modal.addEventListener('keydown', (event) => {
-    if (!capturingId) return
-    // 先按下的修饰键（Alt、Ctrl…）不是组合本身：等真正的键位到达再判定，
-    // 否则 Alt+1 会在 Alt 落下那一刻就被判「不支持的组合」并结束捕获。
-    if (['Alt', 'Control', 'Shift', 'Meta', 'AltGraph'].includes(event.key)) {
-      event.preventDefault()
-      event.stopPropagation()
-      return
-    }
-    const button = bindingButtons.get(capturingId)
-    const id = capturingId
-    capturingId = null
-    if (event.key === 'Escape') {
-      event.preventDefault()
-      event.stopPropagation()
-    } else if (event.key === 'Backspace' || event.key === 'Delete') {
-      event.preventDefault()
-      event.stopPropagation()
-      overrides.set(id, '') // 解绑
-    } else {
-      const accelerator = acceleratorFromEvent(event)
-      if (!accelerator || !isValidAccelerator(accelerator)) {
-        if (button) button.textContent = zh ? '需含 Ctrl/Cmd 或 Alt 修饰' : 'Needs Ctrl/Cmd or Alt'
+    // 捕获键在 modal 上监听；先按下的修饰键不是组合本身，等真正的键位到达再判定
+    modal.addEventListener('keydown', (event) => {
+      if (!capturingId) return
+      if (['Alt', 'Control', 'Shift', 'Meta', 'AltGraph'].includes(event.key)) {
+        event.preventDefault()
+        event.stopPropagation()
         return
       }
-      event.preventDefault()
-      event.stopPropagation()
-      overrides.set(id, accelerator)
-    }
-    if (button) button.textContent = displayOf(EDITOR_COMMANDS.find((command) => command.id === id) as EditorCommandSpec)
-    markConflicts()
-  })
+      const button = bindingButtons.get(capturingId)
+      const id = capturingId
+      capturingId = null
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+      } else if (event.key === 'Backspace' || event.key === 'Delete') {
+        event.preventDefault()
+        event.stopPropagation()
+        overrides.set(id, '')
+      } else {
+        const accelerator = acceleratorFromEvent(event)
+        if (!accelerator || !isValidAccelerator(accelerator)) {
+          if (button) button.textContent = zh ? '需含 Ctrl/Cmd 或 Alt 修饰' : 'Needs Ctrl/Cmd or Alt'
+          return
+        }
+        event.preventDefault()
+        event.stopPropagation()
+        overrides.set(id, accelerator)
+      }
+      if (button) button.textContent = displayOf(EDITOR_COMMANDS.find((command) => command.id === id) as EditorCommandSpec)
+      markConflicts()
+    })
+    renderKeys()
 
-  renderKeys()
-
-  // ─── 页签切换 + 底部按钮 ───────────────────────────────────────────────────
-
-  function activate(tab: Tab): void {
-    activeTab = tab
-    tabImage.classList.toggle('active', tab === 'image')
-    tabKeys.classList.toggle('active', tab === 'keys')
-    imagePage.style.display = tab === 'image' ? 'flex' : 'none'
-    keysPage.style.display = tab === 'keys' ? 'flex' : 'none'
+    const resetAll = document.createElement('button')
+    resetAll.type = 'button'
+    resetAll.className = 'math-modal-btn cancel'
+    resetAll.textContent = t.resetAll
+    resetAll.style.alignSelf = 'flex-start'
+    resetAll.addEventListener('click', () => {
+      overrides.clear()
+      renderKeys()
+    })
+    panes.keys.appendChild(resetAll)
   }
-  tabImage.addEventListener('click', () => activate('image'))
-  tabKeys.addEventListener('click', () => activate('keys'))
-  activate('image')
 
+  // ── 底部：保存（图床字段 + 快捷键）与取消 ──
   const footer = document.createElement('div')
   footer.className = 'colamd-pref-footer'
-  const resetAll = document.createElement('button')
-  resetAll.className = 'math-modal-btn cancel'
-  resetAll.textContent = t.resetAll
-  resetAll.addEventListener('click', () => {
-    overrides.clear()
-    renderKeys()
-  })
+  const note = document.createElement('span')
+  note.className = 'colamd-pref-hint'
+  note.textContent = zh ? '方言 / 表格 / 视图项已即时保存；此处保存图床与快捷键' : 'Dialect & view applied instantly; this saves images & shortcuts'
   const footerRight = document.createElement('div')
   footerRight.className = 'math-modal-footer'
   const cancel = document.createElement('button')
@@ -418,7 +501,6 @@ export async function showPreferences(): Promise<void> {
   save.className = 'math-modal-btn save'
   save.textContent = t.save
   save.addEventListener('click', () => {
-    // 自定义图床的 headers 是一段 JSON 文本，解析失败就原样放弃（不改旧值）
     const headersInput = providerFields.querySelector<HTMLInputElement>('input[data-role="headers"]')
     if (headersInput) {
       try {
@@ -431,30 +513,28 @@ export async function showPreferences(): Promise<void> {
     for (const command of EDITOR_COMMANDS) {
       if (!overrides.has(command.id)) continue
       const value = overrides.get(command.id) as string
-      if (value === command.accelerator) continue // 与默认相同就不存
+      if (value === command.accelerator) continue
       keybindings[command.id] = value
     }
     overlay.remove()
     void window.electronAPI?.updateSettings({ image, keybindings }).then((next) => {
-      // 本窗口立即生效；别的窗口由主进程的 settings:changed 广播跟进
       applyKeybindings(mergedOf(next))
     })
   })
   footerRight.append(cancel, save)
-  footer.append(resetAll, footerRight)
+  footer.append(note, footerRight)
 
   overlay.addEventListener('mousedown', (event) => {
     if (event.target === overlay) overlay.remove()
   })
 
-  body.append(imagePage, keysPage)
-  modal.append(header, tabs, body, footer)
+  activate('editor')
+  modal.append(header, layout, footer)
   overlay.appendChild(modal)
   document.body.appendChild(overlay)
 }
 
 function mergedOf(settings: AppSettings | undefined | void): Record<string, string> {
-  // 与 keymap-config 的 mergeAccelerators 保持一致；这里只需要 id → accelerator
   const merged: Record<string, string> = {}
   for (const command of EDITOR_COMMANDS) merged[command.id] = command.accelerator
   const overrides = settings?.keybindings

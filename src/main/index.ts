@@ -2597,6 +2597,12 @@ ipcMain.handle('log-renderer-error', (_event, message: string) => {
 
 ipcMain.handle('settings:get', () => getSettings())
 
+// 启动时恢复上次文档住 recent.json（主进程的地盘），偏好设置要能读能写
+ipcMain.handle('get-restore-on-launch', () => recentStore.restoreOnLaunch)
+ipcMain.handle('set-restore-on-launch', (_event, enabled: unknown) => {
+  if (typeof enabled === 'boolean') setRestoreOnLaunch(enabled)
+})
+
 ipcMain.handle('settings:update', (_event, patch: SettingsPatch) => {
   const before = getMergedAccelerators()
   const next = updateSettings(patch ?? {})

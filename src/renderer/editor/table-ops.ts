@@ -759,6 +759,14 @@ const sessionWidths = new Map<string, number[]>()
 let widthsDirty = false
 /** 宽度属于哪个文档。换文档前先按**旧**路径落盘，避免记到新文档头上。 */
 let widthsDocPath: string | null = null
+/** 偏好设置 → 表格 → 记住列宽。关掉后不再加载/套用/落盘 sidecar。 */
+let rememberTableWidths = true
+
+export function setRememberTableWidths(on: boolean): void {
+  rememberTableWidths = on
+  // 关掉即刻生效：现有存档从本会话撤下，重建后的表格回到等宽
+  if (!on) sessionWidths.clear()
+}
 
 /** 表格的稳定键：表头行内容 + 列数。改单元格内容不丢列宽，改表头才会重置。 */
 export function tableWidthKey(source: string): string {
@@ -794,7 +802,7 @@ function scheduleWidthsPersist(): void {
 export function loadTableWidthsFor(path: string | null): void {
   flushWidths()
   widthsDocPath = path
-  if (!path || !window.electronAPI?.getTableWidths) {
+  if (!rememberTableWidths || !path || !window.electronAPI?.getTableWidths) {
     sessionWidths.clear()
     return
   }
@@ -837,7 +845,7 @@ export function attachColumnResize(table: HTMLTableElement, source: string): voi
     for (let c = 0; c < colCount; c++) colgroup.appendChild(document.createElement('col'))
   }
   const cols = Array.from(colgroup.children) as HTMLTableColElement[]
-  const saved = widthsForKey(key)
+  const saved = rememberTableWidths ? widthsForKey(key) : undefined
   if (saved && saved.length === colCount) {
     saved.forEach((percent, c) => { cols[c].style.width = `${percent}%` })
   }

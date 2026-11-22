@@ -13,10 +13,12 @@ import { setUiLanguage, isChinese, type UiLanguage } from './ui-language'
 import { applyEditorFont, clearEditorFont, loadSavedEditorFont, resetEditorFontSize, showFontSettingsModal, stepEditorFontSize } from './editor/font-settings'
 import { initCommandKeymap, applyKeybindings } from './editor/keymap-config'
 import { setImageDocPathProvider } from './editor/image-input'
-import { loadTableWidthsFor, runTableMenuAction, type TableAction } from './editor/table-ops'
+import { loadTableWidthsFor, runTableMenuAction, setRememberTableWidths, type TableAction } from './editor/table-ops'
+import { primeDialect, setDialectEffect } from './editor/live-preview'
 import { showPreferences } from './preferences'
 import { setupAppMenu, toggleAppMenu } from './app-menu'
 import { mergeAccelerators } from '../shared/commands'
+import type { AppSettings } from '../shared/settings-types'
 import './themes/base.css'
 import './themes/premium.css'
 import './themes/editor-preview.css'
@@ -1909,12 +1911,30 @@ async function init(): Promise<void> {
     else stepEditorFontSize(delta)
   })
   api.onFormatCommand((id) => runFormatCommand(id as FormatCommandId))
-  // --- ColaMD CT：快捷键 / 偏好设置 / 表格菜单 / 图片文档路径 ---
+  // --- ColaMD CT：快捷键 / 偏好设置 / 表格菜单 / 图片文档路径 / 方言 ---
   setImageDocPathProvider(() => currentFilePath)
   void initCommandKeymap()
   api.onOpenPreferences(() => showPreferences())
+  /** 方言与表格设置落到编辑器（启动一次 + settings:changed 热切换共用）。 */
+  const applyDialectSettings = (settings: AppSettings): void => {
+    primeDialect(settings.markdown)
+    setRememberTableWidths(settings.table?.rememberWidths ?? true)
+    const view = getEditorView()
+    if (view) {
+      view.dispatch({ effects: setDialectEffect.of({
+        looseEmphasis: settings.markdown?.looseEmphasis ?? true,
+        inlineMath: settings.markdown?.inlineMath ?? true,
+        highlight: settings.markdown?.highlight ?? true,
+      }) })
+    }
+  }
+  try {
+    const bootSettings = await api.getSettings()
+    applyDialectSettings(bootSettings)
+  } catch { /* 设置读不到就按默认方言 */ }
   api.onSettingsChanged((settings) => {
     applyKeybindings(mergeAccelerators(settings.keybindings))
+    applyDialectSettings(settings)
   })
   api.onTableMenuAction((action) => {
     const view = getEditorView()

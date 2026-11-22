@@ -38,8 +38,31 @@ export interface ImageSettings {
   }
 }
 
+/** Markdown 方言：默认对中文用户友好（宽松强调），可在偏好设置里关掉回到严格 CommonMark。 */
+export interface MarkdownDialectSettings {
+  /**
+   * 宽松强调：CommonMark 的成对判定把全角标点（。（），：等）当标点，
+   * `**加粗**。`、`（**粗**）` 这类写法会整个失效（2026-11-22 用户报的
+   * 「加粗有时候无法正常显示」）。开启后渲染层补画被严格规则拒掉的
+   * 加粗、斜体、删除线标记——只放宽标点侧判定，空格侧仍从严
+   * （`** 粗**` 依旧不渲染）。
+   */
+  looseEmphasis: boolean
+  /** 行内公式 `$x$`：关闭后 `$` 就是普通字符（块级 `$$` 不受影响）。 */
+  inlineMath: boolean
+  /** 高亮 `==文字==`（本站自有语法）。 */
+  highlight: boolean
+}
+
+export interface TableSettings {
+  /** 记住表格列宽（sidecar 存档）。关闭后列宽不再随文档恢复。 */
+  rememberWidths: boolean
+}
+
 export interface AppSettings {
   image: ImageSettings
+  markdown: MarkdownDialectSettings
+  table: TableSettings
   /** 命令 id → accelerator 覆盖（空串 = 解绑）。 */
   keybindings: Record<string, string>
 }

@@ -118,6 +118,8 @@ export interface ElectronAPI {
   saveTableWidths: (docPath: string | null, widths: Record<string, number[]>) => Promise<void>
   appMenuAction: (channel: string, ...args: unknown[]) => Promise<void>
   setLanguage: (language: 'zh' | 'en') => Promise<void>
+  getRestoreOnLaunch: () => Promise<boolean>
+  setRestoreOnLaunch: (enabled: boolean) => Promise<void>
   setDefaultApp: () => Promise<void>
   openWhatsNew: () => Promise<void>
   openCheatsheet: () => Promise<void>
@@ -321,6 +323,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   setLanguage: (language: 'zh' | 'en') => {
     return ipcRenderer.invoke('set-language', language) as Promise<void>
+  },
+  getRestoreOnLaunch: () => ipcRenderer.invoke('get-restore-on-launch') as Promise<boolean>,
+  setRestoreOnLaunch: (enabled: boolean) => {
+    return ipcRenderer.invoke('set-restore-on-launch', enabled) as Promise<void>
   },
   setDefaultApp: () => ipcRenderer.invoke('set-default-app') as Promise<void>,
   openWhatsNew: () => ipcRenderer.invoke('open-whats-new') as Promise<void>,

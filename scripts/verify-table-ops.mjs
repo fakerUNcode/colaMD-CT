@@ -448,6 +448,62 @@ async function main() {
       }
     }
 
+    // 12) Markdown 方言（2026-11-22 修「加粗有时候不显示」）：
+    //     实测严格 CommonMark 真正失效的是——内容边缘是全角标点紧跟文字
+    //     （**“他说”**然后）、以及 __ 下划线遇中文（前__加粗__后）；
+    //     宽松层补画这两类，snake_case 不受影响，空格侧仍从严。
+    {
+      const countSel = (sel) => evaluate(renderer, `document.querySelectorAll('${sel}').length`)
+      // a) 内容边缘全角引号 + 紧跟文字：严格失效，宽松补画
+      await setDoc('**“他说”**然后\n\n尾行')
+      await setCursor(12)
+      await sleep(400)
+      const quoteStrong = await countSel('.cm-md-strong')
+      check('宽松强调：`**“他说”**然后` 渲染为粗体', quoteStrong >= 1, `cm-md-strong=${quoteStrong}`)
+
+      // b) 中文里的 __ 加粗：严格全灭，宽松补画
+      await setDoc('前__加粗__后\n\n尾行')
+      await setCursor(10)
+      await sleep(400)
+      const underStrong = await countSel('.cm-md-strong')
+      check('宽松强调：`前__加粗__后` 渲染为粗体', underStrong >= 1, `cm-md-strong=${underStrong}`)
+
+      // c) 防误伤：snake_case_word 不变斜体；空格侧从严 `** 粗**` 不渲染
+      await setDoc('snake_case_word 前** 粗**后\n\n尾行')
+      await setCursor(22)
+      await sleep(400)
+      const badCount = await countSel('.cm-md-strong, .cm-md-em')
+      check('宽松强调防误伤（snake_case 与空格侧不渲染）', badCount === 0, `count=${badCount}`)
+
+      // d) 开关热切换：关掉宽松强调 → 补画消失；开回来 → 恢复
+      await setDoc('**“他说”**然后\n\n尾行')
+      await setCursor(12)
+      await sleep(400)
+      await evaluate(renderer, `window.electronAPI.updateSettings({ markdown: { looseEmphasis: false } })`)
+      await sleep(500)
+      const offCount = await countSel('.cm-md-strong')
+      check('关闭宽松强调后补画退回源码', offCount === 0, `cm-md-strong=${offCount}`)
+      await evaluate(renderer, `window.electronAPI.updateSettings({ markdown: { looseEmphasis: true } })`)
+      await sleep(500)
+      const onCount = await countSel('.cm-md-strong')
+      check('重开宽松强调补画恢复', onCount >= 1, `cm-md-strong=${onCount}`)
+
+      // e) 行内公式开关：关掉后 $x$ 是普通文字
+      await setDoc('文字 $x$ 收尾\n\n尾行')
+      await setCursor(9)
+      await sleep(400)
+      const mathOn = await evaluate(renderer, `!!document.querySelector('.cm-md-math-inline')`)
+      check('行内公式默认渲染', mathOn === true)
+      await evaluate(renderer, `window.electronAPI.updateSettings({ markdown: { inlineMath: false } })`)
+      await sleep(500)
+      const mathOff = await evaluate(renderer, `(() => ({ inline: !!document.querySelector('.cm-md-math-inline'), text: document.querySelector('.cm-content').textContent.includes('$x$') }))()`)
+      check('关闭行内公式后显示纯文本 $x$', mathOff.inline === false && mathOff.text === true, JSON.stringify(mathOff))
+      await evaluate(renderer, `window.electronAPI.updateSettings({ markdown: { inlineMath: true } })`)
+      await sleep(500)
+      const mathBack = await evaluate(renderer, `!!document.querySelector('.cm-md-math-inline')`)
+      check('重开行内公式恢复渲染', mathBack === true)
+    }
+
     reportChecks()
   } finally {
     stopVerifyApp(udd)

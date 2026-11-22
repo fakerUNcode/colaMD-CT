@@ -374,6 +374,49 @@ export const cleanExportField = StateField.define<boolean>({
   },
 })
 
+// ─── Markdown 方言（ColaMD CT，偏好设置可热切换）──────────────────────────────
+//
+// 官方语法树是严格 CommonMark/GFM：成对标记（**、*、__、_、~~）的闭合判定把
+// 全角标点当「标点」，于是 `**加粗**。`、`（**粗**）` 整个失效——中文用户最常
+// 踩的「加粗有时候不显示」（2026-11-22）。方言开关住在 StateField 里：
+//   looseEmphasis  渲染层补画被严格规则拒掉的成对标记（只放宽标点侧判定，
+//                  空格侧仍从严：`** 粗**` 依旧不渲染，与 Typora/Obsidian 一致）
+//   inlineMath     关掉后行内 `$x$` 退回普通文字（块级 `$$` 不受影响）
+//   highlight      关掉后 `==高亮==` 不再渲染
+// 缓冲区字节永远不动——这是装饰层的事。
+
+export interface DialectOptions {
+  looseEmphasis: boolean
+  inlineMath: boolean
+  highlight: boolean
+}
+
+let documentDialect: DialectOptions = { looseEmphasis: true, inlineMath: true, highlight: true }
+
+/** 编辑器建起来之前先记一份（第一帧装饰就用它）。 */
+export function primeDialect(options: Partial<DialectOptions>): void {
+  documentDialect = { ...documentDialect, ...options }
+}
+
+export const setDialectEffect = StateEffect.define<DialectOptions>()
+
+export const dialectField = StateField.define<DialectOptions>({
+  create: () => documentDialect,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setDialectEffect)) {
+        documentDialect = effect.value
+        return effect.value
+      }
+    }
+    return value
+  },
+})
+
+function dialectOf(state: EditorState): DialectOptions {
+  return state.field(dialectField, false) ?? documentDialect
+}
+
 function exportingCleanly(state: EditorState): boolean {
   return state.field(cleanExportField, false) ?? false
 }
@@ -505,8 +548,13 @@ function collectMath(
   excluded: Excluded[],
   ranges: DecorationRange[],
   zones: ActiveZone[],
+  inlineMath: boolean,
+  /** 宽松强调要避开这些区间（公式已被替换装饰盖住，里面不能再叠标记）。 */
+  occupy?: { from: number; to: number }[],
 ): void {
   for (const range of scanMath(text, excluded)) {
+    if (!range.block && !inlineMath) continue
+    occupy?.push({ from: range.from, to: range.to })
     // ColaMD CT（2026-11-22 修重大 bug）：行内公式也注册成 zone 并在光标落进
     // 区间时退回源码。此前行内公式「永不显形」+ 点击永远只落到区间起点，
     // 表现为「只有第一次点击有效，之后点哪儿光标都不动」。显形后源码就是
@@ -535,7 +583,8 @@ function collectMath(
 /** `==高亮==` 的匹配。不吃跨行，也不吃空的 `====`。 */
 const HIGHLIGHT_RE = /(?<![=])==(?!=)([^=\n]+?)==(?!=)/g
 
-function collectHighlight(state: EditorState, text: string, ranges: DecorationRange[], excluded: Excluded[]): void {
+function collectHighlight(state: EditorState, text: string, ranges: DecorationRange[], excluded: Excluded[], enabled: boolean, occupy?: { from: number; to: number }[]): void {
+  if (!enabled) return
   const inExcluded = (pos: number) => excluded.some((e) => pos >= e.from && pos < e.to)
 
   HIGHLIGHT_RE.lastIndex = 0
@@ -548,6 +597,7 @@ function collectHighlight(state: EditorState, text: string, ranges: DecorationRa
     // 藏定界符，给中间那段加底色；光标在这一行时定界符露出来，但仍要能认出来
     const delimiter = (from: number, to: number) =>
       active ? MARK({ class: 'cm-md-marker' }) : hide(from, to)
+    occupy?.push({ from: start, to: end })
     ranges.push({ from: start, to: start + 2, deco: delimiter(start, start + 2) })
     ranges.push({ from: end - 2, to: end, deco: delimiter(end - 2, end) })
     ranges.push({ from: start + 2, to: end - 2, deco: MARK({ class: 'cm-md-highlight' }) })
@@ -746,12 +796,18 @@ function collectFrontmatter(
  * 光标落在表格的任意一行里时退回源码，所以改表格仍然是改文字。
  */
 class TableWidget extends WidgetType {
-  constructor(readonly source: string, readonly base: string | null, readonly from: number, readonly to: number) {
+  constructor(
+    readonly source: string,
+    readonly base: string | null,
+    readonly from: number,
+    readonly to: number,
+    readonly inlineMath = true,
+  ) {
     super()
   }
 
   eq(other: TableWidget): boolean {
-    return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to
+    return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to && other.inlineMath === this.inlineMath
   }
 
   toDOM(): HTMLElement {
@@ -769,7 +825,7 @@ class TableWidget extends WidgetType {
     head.forEach((cell, index) => {
       const th = document.createElement('th')
       th.style.textAlign = alignOf(rows[1]?.[index] ?? '')
-      appendInline(th, cell, this.base)
+      appendInline(th, cell, this.base, this.inlineMath)
       headRow.appendChild(th)
     })
     thead.appendChild(headRow)
@@ -780,7 +836,7 @@ class TableWidget extends WidgetType {
       for (let i = 0; i < head.length; i++) {
         const td = document.createElement('td')
         td.style.textAlign = alignOf(rows[1]?.[i] ?? '')
-        appendInline(td, row[i] ?? '', this.base)
+        appendInline(td, row[i] ?? '', this.base, this.inlineMath)
         tr.appendChild(td)
       }
       tbody.appendChild(tr)
@@ -884,9 +940,9 @@ function appendCellText(parent: HTMLElement, text: string, math: MathRange[], fr
   if (cursor < to) parent.appendChild(document.createTextNode(text.slice(cursor, to)))
 }
 
-function appendInline(parent: HTMLElement, text: string, base: string | null): void {
-  // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉
-  const math = scanMath(text, codeSpanRanges(text))
+function appendInline(parent: HTMLElement, text: string, base: string | null, inlineMath = true): void {
+  // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉；方言关掉行内公式时按普通文字走
+  const math = inlineMath ? scanMath(text, codeSpanRanges(text)) : []
   const write = (target: HTMLElement, from: number, to: number): void =>
     appendCellText(target, text, math, from, to)
 
@@ -968,7 +1024,8 @@ function collectTables(
             state.doc.sliceString(node.from, node.to),
             state.field(documentFileUrlField, false) ?? documentFileUrl,
             node.from,
-            node.to
+            node.to,
+            dialectOf(state).inlineMath
           )
         }),
       })
@@ -1328,8 +1385,15 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
  */
 const URL_STOP = /[\u2E80-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/
 
-function collectInline(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+function collectInline(
+  state: EditorState,
+  ranges: DecorationRange[],
+  front: Range | null,
+  occupy: { from: number; to: number }[],
+  paragraphsOut: { from: number; to: number }[],
+): void {
   iterateContent(state, front, (node) => {
+      if (node.name === 'Paragraph') paragraphsOut.push({ from: node.from, to: node.to })
       const from = node.from
       const to = node.to
       const active = isActiveLine(state, from)
@@ -1354,6 +1418,7 @@ function collectInline(state: EditorState, ranges: DecorationRange[], front: Ran
         case 'EmphasisMark':
         case 'StrikethroughMark':
         case 'CodeMark': {
+          occupy.push({ from, to })
           const fence = node.node.parent
           // 整块 Mermaid 替换与围栏空替换同起点时，增量更新会只留下空块。
           if (node.name === 'CodeMark' && fence?.name === 'FencedCode' &&
@@ -1374,18 +1439,22 @@ function collectInline(state: EditorState, ranges: DecorationRange[], front: Ran
           break
         }
         case 'InlineCode': {
+          occupy.push({ from, to })
           ranges.push({ from, to, deco: MARK({ class: 'cm-md-inlinecode' }) })
           break
         }
         case 'StrongEmphasis': {
+          occupy.push({ from, to })
           ranges.push({ from, to, deco: MARK({ class: 'cm-md-strong' }) })
           break
         }
         case 'Emphasis': {
+          occupy.push({ from, to })
           ranges.push({ from, to, deco: MARK({ class: 'cm-md-em' }) })
           break
         }
         case 'Strikethrough': {
+          occupy.push({ from, to })
           ranges.push({ from, to, deco: MARK({ class: 'cm-md-strike' }) })
           break
         }
@@ -1404,6 +1473,102 @@ function collectInline(state: EditorState, ranges: DecorationRange[], front: Ran
           break
     }
   })
+}
+
+// ─── 宽松强调（ColaMD CT 方言开关）──────────────────────────────────────────
+//
+// 只补画**严格 CommonMark 因全角标点拒配**的成对标记：`**加粗**。`、`（**粗**）`
+// 的闭合 `**` 后面跟着全角标点、前面是普通字 → 严格规则判它「不能闭合」→
+// 语法树里没有 StrongEmphasis → 渲染层无从下手。这里的判定只剩两条（Typora 手感）：
+//   开侧：定界符后一个字符不是空白
+//   闭侧：定界符前一个字符不是空白
+// `_`/`__` 额外保留 CommonMark 的「词内不生效」（snake_case_name 不许变斜体）。
+// 被语法树已经认领的区间（occupy：合法强调/代码/链接/公式/高亮）一律跳过，
+// 绝不双画；缓冲区字节不动。
+
+// `_` 的词内防误伤只看 ASCII 词字符（snake_case_name 不能变斜体）；
+// 汉字不算（`前__加粗__后` 要能渲染——严格 CommonMark 恰恰是这批 `__` 写法
+// 在中文里全灭，宽松层的存在意义）。全量实测见 scripts/debug-dialect.mjs。
+const LOOSE_WORD_CHAR = /[A-Za-z0-9_]/
+
+interface LoosePairSpec {
+  delim: string
+  cls: string
+  wordGuard: boolean
+}
+
+const LOOSE_SPECS: LoosePairSpec[] = [
+  { delim: '**', cls: 'cm-md-strong', wordGuard: false },
+  { delim: '__', cls: 'cm-md-strong', wordGuard: true },
+  { delim: '~~', cls: 'cm-md-strike', wordGuard: false },
+  { delim: '*', cls: 'cm-md-em', wordGuard: false },
+  { delim: '_', cls: 'cm-md-em', wordGuard: true },
+]
+
+function collectLooseEmphasis(
+  state: EditorState,
+  paragraphs: { from: number; to: number }[],
+  occupy: { from: number; to: number }[],
+  ranges: DecorationRange[],
+): void {
+  const overlaps = (from: number, to: number) =>
+    occupy.some((span) => from < span.to && to > span.from)
+
+  for (const para of paragraphs) {
+    const text = state.doc.sliceString(para.from, para.to)
+    // 已画上的区间（本函数产出），单 `*` 不能跨过 `**` 配对
+    const painted: { from: number; to: number }[] = []
+    const blocked = (from: number, to: number) =>
+      overlaps(from, to) || painted.some((span) => from < span.to && to > span.from)
+
+    let lineBase = para.from
+    for (const line of text.split('\n')) {
+      scanLooseLine(line, lineBase, blocked, painted, ranges)
+      lineBase += line.length + 1
+    }
+  }
+}
+
+function scanLooseLine(
+  line: string,
+  base: number,
+  blocked: (from: number, to: number) => boolean,
+  painted: { from: number; to: number }[],
+  ranges: DecorationRange[],
+): void {
+  for (const spec of LOOSE_SPECS) {
+    const d = spec.delim.length
+    let i = 0
+    while (i + d <= line.length) {
+      if (!line.startsWith(spec.delim, i) || line[i + d] === spec.delim[0]) { i++; continue }
+      // 开侧：后一个字符存在且不是空白
+      if (i + d >= line.length || /\s/.test(line[i + d])) { i++; continue }
+      // `_` 词内不生效：前一个字符是词字符就不当开侧
+      if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(line[i - 1])) { i++; continue }
+      // 内容里不能再出现定界符（防跨对），从最近一个合法闭侧里挑
+      const contentStart = i + d
+      let close = -1
+      for (let j = contentStart + 1; j + d <= line.length; j++) {
+        if (line[j - 1] === spec.delim[0]) continue
+        if (!line.startsWith(spec.delim, j)) continue
+        if (line[j + d] === spec.delim[0]) continue
+        if (line[j - 1] === undefined || /\s/.test(line[j - 1])) continue
+        if (spec.wordGuard && j + d < line.length && LOOSE_WORD_CHAR.test(line[j + d])) continue
+        close = j
+        break
+      }
+      if (close < 0) { i++; continue }
+      const from = base + i
+      const to = base + close + d
+      if (!blocked(from, to)) {
+        ranges.push({ from, to: from + d, deco: hide(from, from + d) })
+        ranges.push({ from: base + close, to: base + close + d, deco: hide(base + close, base + close + d) })
+        ranges.push({ from: from + d, to: base + close, deco: MARK({ class: spec.cls }) })
+        painted.push({ from, to })
+      }
+      i = close + d
+    }
+  }
 }
 
 // ─── 分页 ────────────────────────────────────────────────────────────────────
@@ -1487,6 +1652,11 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   // 属性区的区间要算一次、多处用：压淡它、把它里面的 YAML 排出 markdown 排版、
   // 不让它的 `---` 被当成分页。
   const front = frontmatterRange(text)
+  // 方言开关（偏好设置 → Markdown；见 dialectField）
+  const dialect = dialectOf(state)
+  // 宽松强调要避开的区间：合法强调/代码/链接由 collectInline 记，公式与高亮在下面记
+  const occupy: { from: number; to: number }[] = []
+  const paragraphs: { from: number; to: number }[] = []
 
   if (flash && flash.to <= state.doc.length) {
     ranges.push({ from: flash.from, to: flash.to, deco: MARK({ class: 'cm-md-jump-flash' }) })
@@ -1498,14 +1668,16 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   collectHTML(state, ranges, front, zones)
   collectImages(state, ranges, front)
   collectPages(state, ranges, front)
-  collectInline(state, ranges, front)
+  collectInline(state, ranges, front, occupy, paragraphs)
   collectFrontmatter(state, ranges, front, zones)
   collectTables(state, ranges, front, zones)
   collectTaskItems(state, ranges, front)
   collectMermaid(state, text, ranges, front, zones)
-  collectHighlight(state, text, ranges, excluded)
+  collectHighlight(state, text, ranges, excluded, dialect.highlight, occupy)
   // 公式放最后：它覆盖区间，其它装饰不该插进它里面
-  collectMath(state, text, excluded, ranges, zones)
+  collectMath(state, text, excluded, ranges, zones, dialect.inlineMath, occupy)
+  // 宽松强调垫底：所有合法区间都记完之后才知道哪些空档可以补画
+  if (dialect.looseEmphasis) collectLooseEmphasis(state, paragraphs, occupy, ranges)
 
   // 排序键必须带上 startSide：RangeSetBuilder 只接受按 (from, startSide) 递增的顺序，
   // 原来只按 (from, to) 排，同一段区间上挂了两种装饰时就翻车。
@@ -1538,9 +1710,11 @@ export const livePreviewField = StateField.define<DecorationSet>({
     const parsed = tr.effects.some((effect) => effect.is(decorationsRefreshEffect))
     // 文档换了个文件，图片的相对路径要按新的基准重新解析
     const rebased = tr.effects.some((effect) => effect.is(setDocumentFileUrlEffect))
+    // 方言开关切换（偏好设置 → Markdown）要整层重算
+    const dialectChanged = tr.effects.some((effect) => effect.is(setDialectEffect))
     const clean = tr.state.field(cleanExportField, false) ?? false
     const wasClean = tr.startState.field(cleanExportField, false) ?? false
-    if (!tr.docChanged && !flash && !parsed && !rebased && clean === wasClean) {
+    if (!tr.docChanged && !flash && !parsed && !rebased && !dialectChanged && clean === wasClean) {
       if (!tr.selection) return deco
       const zones = zonesByDeco.get(deco) ?? []
       if (activeZonesKey(tr.state, zones) === activeZonesKey(tr.startState, zones)) {
@@ -1617,6 +1791,7 @@ export const livePreview: Extension = [
   editorFocusField,
   cleanExportField,
   documentFileUrlField,
+  dialectField,
   livePreviewField,
   parseRefresh,
 ]

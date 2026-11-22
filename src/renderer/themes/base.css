@@ -1818,31 +1818,116 @@ body.presenting #editor .cm-content svg {
   display: none;
 }
 
-/* 偏好设置 */
+/* 偏好设置（完整版：侧边导航 + 分区内容） */
 .colamd-pref-modal {
   width: 560px;
   max-height: 80vh;
 }
 
-.colamd-pref-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border-color);
+.colamd-pref-full {
+  width: 720px;
+  max-width: 94vw;
 }
 
-.colamd-pref-tab {
-  padding: 8px 14px;
-  border: none;
-  border-bottom: 2px solid transparent;
+.colamd-pref-layout {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+
+.colamd-pref-nav {
+  flex: none;
+  width: 128px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-color) 4%, transparent);
+}
+
+.colamd-pref-nav-item {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary, var(--text-muted, var(--text-color)));
-  font-size: 14px;
+  font-size: 13px;
+  text-align: left;
   cursor: pointer;
 }
 
-.colamd-pref-tab.active {
+.colamd-pref-nav-item.active {
+  background: var(--bg-color);
   color: var(--link-color);
-  border-bottom-color: var(--link-color);
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.colamd-pref-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  max-height: 56vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.colamd-pref-pane {
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 开关行 */
+.colamd-pref-toggle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 4px 0;
+}
+
+.colamd-pref-toggle-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.colamd-pref-toggle-name {
+  color: var(--text-color);
+  font-size: 13px;
+}
+
+.colamd-pref-switch {
+  flex: none;
+  appearance: none;
+  width: 34px;
+  height: 20px;
+  margin: 2px 0 0;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-color) 18%, transparent);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.colamd-pref-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-color);
+  transition: left 0.15s;
+}
+
+.colamd-pref-switch:checked {
+  background: var(--link-color);
+}
+
+.colamd-pref-switch:checked::after {
+  left: 16px;
 }
 
 .colamd-pref-body {

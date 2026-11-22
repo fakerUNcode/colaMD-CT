@@ -9,9 +9,9 @@ import { app } from 'electron'
 import { join, dirname } from 'path'
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { mergeAccelerators, isValidAccelerator } from '../shared/commands'
-import type { AppSettings, ImageSettings, ImageInsertBehavior, ImageUploadProvider, SettingsPatch } from '../shared/settings-types'
+import type { AppSettings, ImageSettings, ImageInsertBehavior, ImageUploadProvider, MarkdownDialectSettings, TableSettings, SettingsPatch } from '../shared/settings-types'
 
-export type { AppSettings, ImageSettings, ImageInsertBehavior, ImageUploadProvider, SettingsPatch }
+export type { AppSettings, ImageSettings, ImageInsertBehavior, ImageUploadProvider, MarkdownDialectSettings, TableSettings, SettingsPatch }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   image: {
@@ -25,6 +25,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     smms: { token: '' },
     custom: { url: '', fieldName: 'image', headers: {}, responsePath: '' },
   },
+  markdown: { looseEmphasis: true, inlineMath: true, highlight: true },
+  table: { rememberWidths: true },
   keybindings: {},
 }
 
@@ -32,11 +34,29 @@ const settingsPath = () => join(app.getPath('userData'), 'settings.json')
 
 let current: AppSettings = loadFromDisk()
 
+function sanitizedMarkdown(value: unknown): Partial<MarkdownDialectSettings> {
+  if (!value || typeof value !== 'object') return {}
+  const source = value as Record<string, unknown>
+  const out: Partial<MarkdownDialectSettings> = {}
+  for (const key of ['looseEmphasis', 'inlineMath', 'highlight'] as const) {
+    if (typeof source[key] === 'boolean') out[key] = source[key] as boolean
+  }
+  return out
+}
+
+function sanitizedTable(value: unknown): Partial<TableSettings> {
+  if (!value || typeof value !== 'object') return {}
+  const source = value as Record<string, unknown>
+  return typeof source.rememberWidths === 'boolean' ? { rememberWidths: source.rememberWidths } : {}
+}
+
 function loadFromDisk(): AppSettings {
   try {
     const parsed = JSON.parse(readFileSync(settingsPath(), 'utf-8')) as Partial<AppSettings>
     return {
       image: { ...DEFAULT_SETTINGS.image, ...(sanitizedImage(parsed.image)) },
+      markdown: { ...DEFAULT_SETTINGS.markdown, ...(sanitizedMarkdown(parsed.markdown)) },
+      table: { ...DEFAULT_SETTINGS.table, ...(sanitizedTable(parsed.table)) },
       keybindings: sanitizedBindings(parsed.keybindings),
     }
   } catch {
@@ -96,6 +116,8 @@ function persist(): void {
 /** 局部合并 + 落盘。返回合并后的完整设置。 */
 export function updateSettings(patch: SettingsPatch): AppSettings {
   if (patch?.image) current.image = { ...current.image, ...sanitizedImage(patch.image) }
+  if (patch?.markdown) current.markdown = { ...current.markdown, ...sanitizedMarkdown(patch.markdown) }
+  if (patch?.table) current.table = { ...current.table, ...sanitizedTable(patch.table) }
   if (patch?.keybindings) current.keybindings = { ...current.keybindings, ...sanitizedBindings(patch.keybindings) }
   persist()
   return current
