@@ -1517,6 +1517,25 @@ body.presenting #editor .cm-content svg {
 
 /* ─── ColaMD CT：图片询问弹窗 / 表格网格选择器 / 通知浮层 / 偏好设置 ──────── */
 
+/*
+ * 原生选区与正文选区同色（2026-11-22 用户报的「表格内文字选中风格不一致」）。
+ * 正文选区是 CodeMirror 画的那条色带（.cm-selectionBackground，见 editor-preview.css），
+ * 只覆盖 CM 自己的行；表格单元格（contenteditable）、源码编辑器、弹窗输入框这些
+ * 「非正文文字」走浏览器原生 ::selection。而 CM 的 nativeSelectionTheme 以
+ * `!important` 把 `.cm-line ::selection` 钉成透明（画的那条色带负责显形）、把
+ * `.cm-content :focus ::selection` 钉成浏览器默认 Highlight（特异 0,3,1）——
+ * 所以这里必须 `#id` 前缀 + `!important` 才压得过；作用域只圈这些非正文元素，
+ * 免得正文出现「色带 + 原生选区」双绘。
+ */
+#editor .cm-md-table-widget ::selection,
+#editor .cm-md-math ::selection,
+#source-editor ::selection,
+.math-modal ::selection,
+.colamd-menu ::selection,
+.colamd-image-info ::selection {
+  background: var(--selection-bg, color-mix(in srgb, var(--text-color) 18%, transparent)) !important;
+}
+
 /* Windows 标题栏的应用菜单（汉堡按钮）：主题化面板，替代原生灰菜单 */
 .colamd-menu {
   position: fixed;

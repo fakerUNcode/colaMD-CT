@@ -639,6 +639,32 @@ body.exporting .cm-content .cm-md-frontmatter {
   height: auto;
 }
 
+/* 缩放控件：不再钉在图内右上角遮挡画面（2026-11-22 用户报的）。
+ * 默认隐形，鼠标悬停整张图时浮到**图的右侧外沿**、垂直居中。
+ * 位置走 pele 自己的变量（--pele-zoom-top/right/bottom/left，默认 8px）；
+ * opacity/transform 是我们叠上去的，pele 不认这两个。悬停控件本身也算悬停图
+ * （绝对定位的子元素仍向祖先传播 hover），所以控件上不会闪。 */
+.cm-content .cm-md-mermaid {
+  position: relative;
+}
+
+.cm-content .cm-md-mermaid .pele-zoom {
+  --pele-zoom-top: 50%;
+  --pele-zoom-right: -46px;
+  transform: translateY(-50%);
+  opacity: 0 !important;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 8;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+
+.cm-content .cm-md-mermaid:hover .pele-zoom,
+.cm-content .cm-md-mermaid:focus-within .pele-zoom {
+  opacity: 1 !important;
+  pointer-events: auto;
+}
+
 .cm-content .cm-md-mermaid-failed {
   text-align: left;
   font-family: var(--font-mono);

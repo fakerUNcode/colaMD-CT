@@ -504,6 +504,70 @@ async function main() {
       check('重开行内公式恢复渲染', mathBack === true)
     }
 
+    // 13) Mermaid 缩放控件：默认隐形不遮画面，悬停浮现于整图右侧（2026-11-22）。
+    //     注意 pele 只在图**放不下**（自然宽度超过列宽）时才建控件（官方 #129），
+    //     小图本来就没有控件，不算 bug；测试用一张宽图。
+    {
+      const MERMAID_DOC = '```mermaid\nflowchart LR\nA[开始]-->B[需求分析]-->C[设计]-->D[实现]-->E[测试]-->F[发布]-->G[复盘总结]\n```\n\n尾行'
+      await setDoc(MERMAID_DOC)
+      await setCursor(MERMAID_DOC.length)
+      // pele 懒加载 + 异步画图，轮询等控件出现
+      let zoomInfo = null
+      for (let i = 0; i < 20 && !zoomInfo; i++) {
+        await sleep(400)
+        zoomInfo = await evaluate(renderer, `(() => {
+          const z = document.querySelector('.cm-md-mermaid .pele-zoom')
+          if (!z) return null
+          const s = getComputedStyle(z)
+          return JSON.stringify({ opacity: s.opacity, right: s.right, top: s.top })
+        })()`)
+      }
+      check('Mermaid 缩放控件已挂载', !!zoomInfo, 'pele-zoom 未出现（8 秒）')
+      if (zoomInfo) {
+        // 虚拟鼠标可能还停在先前用例的坐标上（恰好落在图上，:hover 生效）——
+        // 先挪到左下角空地再读“默认隐形”
+        await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 12, y: 420 })
+        await sleep(300)
+        const idle = await evaluate(renderer, `(() => { const z = document.querySelector('.cm-md-mermaid .pele-zoom'); return z ? getComputedStyle(z).opacity : 'none' })()`)
+        const geom = JSON.parse(zoomInfo)
+        check('控件默认隐形（不遮画面）', idle === '0', `opacity=${idle}`)
+        check('控件定位在图右侧外沿', /-/.test(geom.right) && geom.right !== '8px', `right=${geom.right}`)
+        const host = await evaluate(renderer, `(() => {
+          const m = document.querySelector('.cm-md-mermaid')
+          if (!m) return null
+          const r = m.getBoundingClientRect()
+          return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 })
+        })()`)
+        if (host) {
+          const h = JSON.parse(host)
+          await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: h.x, y: h.y })
+          await sleep(400)
+          const hovered = await evaluate(renderer, `(() => { const z = document.querySelector('.cm-md-mermaid .pele-zoom'); return z ? getComputedStyle(z).opacity : 'none' })()`)
+          check('悬停整图时控件浮现', hovered === '1', `opacity=${hovered}`)
+        }
+      }
+    }
+
+    // 14) 非正文选中色与正文一致：表格单元格的原生 ::selection 跟随主题
+    {
+      await setDoc(`${TABLE}\n\n尾行`)
+      await setCursor(TABLE.length + 3)
+      await sleep(400)
+      const selInfo = await evaluate(renderer, `(() => {
+        const td = document.querySelector('.cm-md-table-widget tbody td')
+        if (!td) return null
+        const themed = getComputedStyle(document.body).getPropertyValue('--selection-bg').trim()
+        const native = getComputedStyle(td, '::selection').backgroundColor
+        return JSON.stringify({ themed, native })
+      })()`)
+      check('表格单元格存在（选中色用例前置）', !!selInfo)
+      if (selInfo) {
+        const { themed, native } = JSON.parse(selInfo)
+        const toRgb = (v) => v.replace(/\s+/g, '').replace('rgba(', 'rgba(')
+        check('表格选中色跟随主题 --selection-bg', themed !== '' && toRgb(native) === toRgb(themed), `theme=${themed} native=${native}`)
+      }
+    }
+
     reportChecks()
   } finally {
     stopVerifyApp(udd)
