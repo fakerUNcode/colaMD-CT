@@ -74,6 +74,8 @@ const VIEW = `(() => {
 const T = (text) => ({ text })
 const S = (sel, min = 1) => ({ sel, min })
 const N = (sel) => ({ sel, min: 0 })
+/** 选择器命中元素的文字必须逐个等于给定列表（断言「哪些字被加粗了」这类类级事实）。 */
+const P = (sel, texts) => ({ sel, texts })
 const FENCE = '```'
 
 const CASES = [
@@ -100,6 +102,21 @@ const CASES = [
   ['转义的定界符不被宽松层补画', '\\*不是斜体\\*', T('*不是斜体*')],
   ['跨行斜体', '前*斜体\n续行*后', T('前斜体续行后')],
   ['跨行加粗内嵌斜体', '**外层 *内\n斜* 层**', T('外层 内斜 层')],
+  // ── 一句话里两个加粗（2026-11-23 用户报：全角标点边缘导致中间被加粗、外层星号露出来）──
+  // 严格 CommonMark 判定「紧跟 “ 的 ** 不能当开侧、前面是 ” 的不能当闭侧」，
+  // 于是中间那对 ** 被配上、外层成了普通文字。宽松层的修复对负责纠正（见 live-preview
+  // 的 analyzeEmphasisRepair）。对照组（字母、逗号隔开）本就正常，防止修复误伤。
+  ['双加粗·引号边缘（用户原例）', '他说**“这个”**和**“那个”**的时候', T('他说“这个”和“那个”的时候')],
+  ['双加粗·引号边缘·中间不加粗', '他说**“这个”**和**“那个”**的时候', P('.cm-md-strong', ['“这个”', '“那个”'])],
+  ['双加粗·行首起', '**“甲”**和**乙**。', T('“甲”和乙。')],
+  ['双加粗·行首起·中间不加粗', '**“甲”**和**乙**。', P('.cm-md-strong', ['“甲”', '乙'])],
+  ['双加粗·句号边缘', '**甲。**和**乙。**', T('甲。和乙。')],
+  ['双加粗·括号边缘', '**（甲）**和**（乙）**', T('（甲）和（乙）')],
+  ['双加粗·三处混排', '**“甲”**、**乙**、**“丙”**', T('“甲”、乙、“丙”')],
+  ['双加粗·删除线引号边缘', '他说~~“这个”~~和~~“那个”~~的时候', T('他说“这个”和“那个”的时候')],
+  ['双加粗·字母对照（本就正常）', 'a**b**c**d**e', T('abcde')],
+  ['双加粗·普通中文对照（本就正常）', '前**甲**和**乙**后', T('前甲和乙后')],
+  ['双加粗·逗号隔开对照（本就正常）', '**甲**，**乙**。', T('甲，乙。')],
   // ── 强调：下划线 ──
   ['下划线加粗', '__下划粗__', T('下划粗')],
   ['下划线斜体', '_下划斜_', T('下划斜')],
@@ -219,6 +236,14 @@ const CASES = [
   ['行内公式', '文字 $x$ 收尾', S('.cm-md-math-inline')],
   ['块级公式', '$$\nE = mc^2\n$$', S('.cm-md-math-block')],
   ['价格美元号不是公式', '价格 $100 到 $200 之间', N('.cm-md-math-inline')],
+  // 2026-11-23 用户报「行内公式不能正常渲染」：`\(…\)` 形式在内容没有 LaTeX 信号
+  // （纯字母 / 字母加减）时整段不渲染。行内形式已放宽（见 math-scan 的 plainMath），
+  // 块形式 `\[…\` 仍要信号——`\[1\]` 学术引用长得一样。
+  ['行内公式·紧贴中文', '前$x$后', S('.cm-md-math-inline')],
+  ['反斜杠括号·纯字母', '见\\(x\\)处', S('.cm-md-math-inline')],
+  ['反斜杠括号·字母运算', '见\\(a+b\\)处', S('.cm-md-math-inline')],
+  ['反斜杠括号·带信号', '\\(E=mc^2\\) 能量', S('.cm-md-math-inline')],
+  ['开侧带空格不算公式', '这样 $ x$ 不算', N('.cm-md-math-inline')],
   // ── 换行 ──
   ['硬换行（两空格）', '第一行  \n第二行', T('第一行第二行')],
   ['硬换行（反斜杠）', '第一行\\\n第二行', T('第一行第二行')],
@@ -291,7 +316,8 @@ async function main() {
       await sleep(320)
       const got = await evaluate(renderer, `(() => ({
         text: document.querySelector('#editor .cm-content').textContent,
-        n: document.querySelectorAll(${JSON.stringify(expect.sel ?? '.none')}).length
+        n: document.querySelectorAll(${JSON.stringify(expect.sel ?? '.none')}).length,
+        t: [...document.querySelectorAll(${JSON.stringify(expect.sel ?? '.none')})].map((el) => el.textContent).join('¦')
       }))()`)
       let ok
       let detail = ''
@@ -299,6 +325,9 @@ async function main() {
         const want = `${expect.text}尾`
         ok = got.text === want
         detail = `看到 ${JSON.stringify(got.text)}，应为 ${JSON.stringify(want)}`
+      } else if ('texts' in expect) {
+        ok = got.t === expect.texts.join('¦')
+        detail = `${expect.sel} 命中 ${JSON.stringify(got.t)}，应为 ${JSON.stringify(expect.texts.join('¦'))}`
       } else {
         ok = expect.min === 0 ? got.n === 0 : got.n >= expect.min
         detail = `${expect.sel} 数量 ${got.n}，应${expect.min === 0 ? '为 0' : `≥ ${expect.min}`}`

@@ -27,6 +27,7 @@ export const EDITOR_COMMANDS: readonly EditorCommandSpec[] = [
   { id: 'inlineCode', zh: '行内代码', en: 'Inline Code', accelerator: 'CmdOrCtrl+E', group: 'inline' },
   { id: 'strikethrough', zh: '删除线', en: 'Strikethrough', accelerator: 'CmdOrCtrl+Shift+X', group: 'inline' },
   { id: 'highlight', zh: '高亮', en: 'Highlight', accelerator: 'CmdOrCtrl+Shift+H', group: 'inline' },
+  { id: 'mathInline', zh: '行内公式', en: 'Inline Math', accelerator: 'CmdOrCtrl+Shift+J', group: 'inline' },
   { id: 'link', zh: '链接（网址取自剪贴板）', en: 'Link (URL from clipboard)', accelerator: 'CmdOrCtrl+K', group: 'inline' },
   // --- 标题 ---
   { id: 'heading1', zh: '一级标题', en: 'Heading 1', accelerator: 'CmdOrCtrl+1', group: 'heading' },

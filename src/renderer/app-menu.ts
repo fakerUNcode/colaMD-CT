@@ -139,6 +139,7 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
         sep(zh ? '行内' : 'Inline'),
         command('bold', zh), command('italic', zh), command('underline', zh),
         command('inlineCode', zh), command('strikethrough', zh), command('highlight', zh),
+        command('mathInline', zh),
         {
           label: zh ? '标题' : 'Heading',
           items: () => [

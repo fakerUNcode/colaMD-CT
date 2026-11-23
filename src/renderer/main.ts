@@ -1594,6 +1594,17 @@ function renderFileList(files: import('../preload/index').SiblingFile[]): void {
     li.appendChild(btn)
     list.appendChild(li)
   }
+  // ColaMD CT（2026-11-23 修「文件栏不跟随」）：当前文件的那一行滚进面板视野，
+  // 长目录里打开深层文件时才看得见它被标出来。与大纲的 revealOutlineEntry 同一套
+  // 手动滚动（不用 scrollIntoView，避免牵动正文滚动）。
+  const activeRow = list.querySelector('button.active')
+  if (activeRow instanceof HTMLButtonElement) {
+    const panel = filePanelEl()
+    const top = activeRow.getBoundingClientRect().top - panel.getBoundingClientRect().top + panel.scrollTop
+    const bottom = top + activeRow.offsetHeight
+    if (top < panel.scrollTop) panel.scrollTop = top
+    else if (bottom > panel.scrollTop + panel.clientHeight) panel.scrollTop = bottom - panel.clientHeight
+  }
 }
 
 async function refreshSiblings(): Promise<void> {
@@ -2027,9 +2038,15 @@ async function init(): Promise<void> {
   // The outline tracks scrolling in both modes so it doubles as a progress
   // view (#64); rAF keeps the rect reads to one batch per frame. `scrollend`
   // also releases the outline jump lock as soon as a jump scroll settles.
-  editorEl().addEventListener('scroll', scheduleOutlineActiveSync, { passive: true })
+  // ColaMD CT（2026-11-23 修「大纲高亮不跟随」）：正文实际滚在 CodeMirror 的
+  // `.cm-scroller` 上，`#editor` 自己不动，而 scroll / scrollend 都不冒泡——
+  // 只挂在 #editor 上等于永远收不到，高亮停在点击处不跟手。两个元素都挂
+  // （重复触发无害：sync 有 rAF 合并，endOutlineJump 幂等）。
+  for (const target of [editorEl(), editorScroller()]) {
+    target.addEventListener('scroll', scheduleOutlineActiveSync, { passive: true })
+    target.addEventListener('scrollend', endOutlineJump)
+  }
   sourceEl().addEventListener('scroll', scheduleOutlineActiveSync, { passive: true })
-  editorEl().addEventListener('scrollend', endOutlineJump)
   sourceEl().addEventListener('scrollend', endOutlineJump)
   // Anchor-link jumps start inside the editor; the phase signal engages the
   // same jump lock the outline clicks use, so the highlight cannot be stolen

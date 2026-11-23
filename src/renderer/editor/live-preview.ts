@@ -136,8 +136,15 @@ function pushListItemLines(state: EditorState, node: SyntaxNode, ranges: Decorat
   }
 }
 
+/** 本次构建里由 hide() 造出的替换装饰。组装前要认出它们（见 buildDecorations 的过滤）。 */
+const hiddenDecos = new WeakSet<Decoration>()
+
 /** 把区间藏起来（只是看不见，文本还在）。 */
-const hide = (from: number, to: number) => Decoration.replace({})
+const hide = (from: number, to: number) => {
+  const deco = Decoration.replace({})
+  hiddenDecos.add(deco)
+  return deco
+}
 
 /** 画一段与源码不同的文字（HTML 实体解码后的字符）。 */
 class TextWidget extends WidgetType {
@@ -723,6 +730,8 @@ function collectMath(
   occupy?: { from: number; to: number }[],
   /** 整段被换成 widget 的区间，高亮 `==` 不许跨过去配对（公式里 `==` 是等号）。 */
   opaque?: { from: number; to: number }[],
+  /** 本次构建里真的画成了 widget 的公式区间（组装前用它滤掉嵌在里面的隐藏装饰）。 */
+  widgetRanges?: { from: number; to: number }[],
 ): void {
   for (const range of scanMath(text, excluded)) {
     if (!range.block && !inlineMath) continue
@@ -736,11 +745,14 @@ function collectMath(
     zones.push({ from: range.from, to: range.to, kind: 'block' })
     // 光标落进区间，或查找的当前项落进区间：退回源码（后者见 searchCurrentIn）
     if (isBlockActive(state, range.from, range.to) || searchCurrentIn(state, range.from, range.to)) {
-      const delim = range.block ? 2 : 1
+      // `\(`/`\[` 的定界符占两个字符，`$` 占一个：标记要盖住完整的定界符
+      const head = text.slice(range.from, range.from + 2)
+      const delim = range.block || head === '\\(' || head === '\\[' ? 2 : 1
       ranges.push({ from: range.from, to: range.from + delim, deco: MARK({ class: 'cm-md-marker' }) })
       ranges.push({ from: range.to - delim, to: range.to, deco: MARK({ class: 'cm-md-marker' }) })
       continue
     }
+    widgetRanges?.push({ from: range.from, to: range.to })
     ranges.push({
       from: range.from,
       to: range.to,
@@ -2063,16 +2075,22 @@ function collectInline(
   ranges: DecorationRange[],
   front: Range | null,
   occupy: { from: number; to: number }[],
-  paragraphsOut: { from: number; to: number }[],
+  /** 被宽松层判成「语法树错配」而撤掉加粗的强调节点（按节点起点索引）。 */
+  suppressed: Set<number>,
+  /** 宽松层的修复配对：EmphasisMark 的显形要用它认「这一对正在披露」。 */
+  repairs: readonly LoosePair[],
 ): void {
+  // 修复配对按定界符起点建索引：光标落在修复对里时，被语法树藏掉的半个定界符也要显形
+  const repairByMark = new Map<number, LoosePair>()
+  for (const pair of repairs) {
+    repairByMark.set(pair.openFrom, pair)
+    repairByMark.set(pair.closeFrom, pair)
+  }
+  const repairRevealed = (markFrom: number): boolean => {
+    const pair = repairByMark.get(markFrom)
+    return !!pair && within(state, pair.from, pair.to)
+  }
   iterateContent(state, front, (node) => {
-      if (node.name === 'Paragraph') paragraphsOut.push({ from: node.from, to: node.to })
-      // 标题里的强调同样要走宽松补画（只取文字部分，不含 # 与下划线）
-      if (/^ATXHeading[1-6]$/.test(node.name)) paragraphsOut.push({ from: node.from, to: node.to })
-      if (node.name === 'SetextHeading1' || node.name === 'SetextHeading2') {
-        const mark = node.node.getChild('HeaderMark')
-        if (mark) paragraphsOut.push({ from: node.from, to: mark.from - 1 })
-      }
       // 链接定义行整行压淡，里面的地址/标签不再单独上链接色
       if (node.name === 'LinkReference') return false
       const from = node.from
@@ -2107,7 +2125,9 @@ function collectInline(
               codeInsideFence(state, fence).trim()) break
           // 光标在这个构造里（或紧贴两端）时标记压淡显形（见 constructRevealed）。
           // 围栏代码块本身不在可披露之列——光标在代码块里时 ``` 不该跟着显形。
+          // 错配修复对（宽松层）的半个定界符也归这里藏：光标落进修复对里时它同样要显形。
           const shown = constructRevealed(state, node.node.parent!)
+            || (node.name !== 'CodeMark' && repairRevealed(from))
           ranges.push({ from, to, deco: shown ? MARK({ class: 'cm-md-marker' }) : hide(from, to) })
           break
         }
@@ -2195,20 +2215,25 @@ function collectInline(
           }
           break
         }
+        // 三个强调类节点共用一条规矩：被宽松层判成「错配」的（suppressed）不上样式，
+        // 定界符照旧由 EmphasisMark 分支藏掉，正文由宽松层的修复配对重新加粗
         case 'StrongEmphasis': {
           occupy.push({ from, to })
+          if (suppressed.has(from)) break
           const inner = styledRange(node.node, constructRevealed(state, node.node))
           ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-strong' }) })
           break
         }
         case 'Emphasis': {
           occupy.push({ from, to })
+          if (suppressed.has(from)) break
           const inner = styledRange(node.node, constructRevealed(state, node.node))
           ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-em' }) })
           break
         }
         case 'Strikethrough': {
           occupy.push({ from, to })
+          if (suppressed.has(from)) break
           const inner = styledRange(node.node, constructRevealed(state, node.node))
           ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-strike' }) })
           break
@@ -2245,8 +2270,25 @@ function collectInline(
 // （`上的**分布式\n平台（Socket）**向程序`），逐行扫永远找不到这一对。
 // 引用标记（`> `）与列表缩进是块结构不是段落文字，拼逻辑文本时去掉，并保留
 // 「逻辑位置 → 文档位置」的映射，装饰最终落在文档位置上。
-// 被语法树认领的区间（occupy：合法强调/代码/链接/公式/高亮/HTML）一律跳过，绝不双画；
-// 反斜杠转义的定界符（`\*`）也不算定界符。缓冲区字节不动。
+// 补画对：被语法树认领的区间（occupy：合法强调/代码/链接/公式/高亮/HTML）相交就不画，
+// 绝不双画；反斜杠转义的定界符（`\*`）也不算定界符。缓冲区字节不动。
+// 修复对（v2.7.21）：语法树把定界符**错配**走时（见 analyzeEmphasisRepair）例外，
+// 只在定界符上与错配节点相交、内容干净——照画，并撤掉错配节点的加粗。
+
+/** 宽松层要扫的「段落」：正文段落 + 标题文字部分。 */
+function collectParagraphs(state: EditorState, front: Range | null): { from: number; to: number }[] {
+  const out: { from: number; to: number }[] = []
+  iterateContent(state, front, (node) => {
+    if (node.name === 'Paragraph') out.push({ from: node.from, to: node.to })
+    // 标题里的强调同样要走宽松补画（只取文字部分，不含 # 与下划线）
+    if (/^ATXHeading[1-6]$/.test(node.name)) out.push({ from: node.from, to: node.to })
+    if (node.name === 'SetextHeading1' || node.name === 'SetextHeading2') {
+      const mark = node.node.getChild('HeaderMark')
+      if (mark) out.push({ from: node.from, to: mark.from - 1 })
+    }
+  })
+  return out
+}
 
 // `_` 的词内防误伤只看 ASCII 词字符（snake_case_name 不能变斜体）；
 // 汉字不算（`前__加粗__后` 要能渲染——严格 CommonMark 恰恰是这批 `__` 写法
@@ -2267,12 +2309,236 @@ const LOOSE_SPECS: LoosePairSpec[] = [
   { delim: '_', cls: 'cm-md-em', wordGuard: true },
 ]
 
+/** 宽松扫描里的一个候选配对（文档绝对坐标）。 */
+interface LoosePair {
+  /** 配对整段 [from, to)。 */
+  from: number
+  to: number
+  /** 开侧定界符 [openFrom, openFrom + d)；闭侧 [closeFrom, closeFrom + d)。 */
+  openFrom: number
+  closeFrom: number
+  delim: string
+  d: number
+  cls: string
+  /** 开/闭侧定界符与语法树里某个强调节点的标记重合时的节点下标，否则 -1。 */
+  openClaim: number
+  closeClaim: number
+  /** 两侧被同一个节点认领：语法树本来就是这么配的，不归宽松层管。 */
+  sameNode: boolean
+  /** 至少一侧被**别的配对**的标记认领：语法树把定界符错配走了，这一对是修复。 */
+  repair: boolean
+}
+
+/** 语法树里的强调节点（含删除线）。宽松层据此区分「补画」与「修复」。 */
+interface EmphasisNode {
+  from: number
+  to: number
+  openMark: { from: number; to: number } | null
+  closeMark: { from: number; to: number } | null
+}
+
+function collectEmphasisNodes(state: EditorState, front: Range | null): EmphasisNode[] {
+  const out: EmphasisNode[] = []
+  iterateContent(state, front, (node) => {
+    if (node.name !== 'StrongEmphasis' && node.name !== 'Emphasis' && node.name !== 'Strikethrough') return
+    const markEdge = (edge: SyntaxNode | null): { from: number; to: number } | null =>
+      edge && edge.name.endsWith('Mark') && edge.from < edge.to ? { from: edge.from, to: edge.to } : null
+    out.push({ from: node.from, to: node.to, openMark: markEdge(node.node.firstChild), closeMark: markEdge(node.node.lastChild) })
+  })
+  return out
+}
+
+/** 定界符起点 → 它是哪个节点的哪一侧标记。 */
+function markClaimIndex(emphasis: EmphasisNode[]): Map<number, { node: number; side: 'open' | 'close'; len: number }> {
+  const index = new Map<number, { node: number; side: 'open' | 'close'; len: number }>()
+  emphasis.forEach((node, i) => {
+    if (node.openMark) index.set(node.openMark.from, { node: i, side: 'open', len: node.openMark.to - node.openMark.from })
+    if (node.closeMark) index.set(node.closeMark.from, { node: i, side: 'close', len: node.closeMark.to - node.closeMark.from })
+  })
+  return index
+}
+
+/**
+ * 段落的「逻辑文本」：剥掉续行的引用标记与缩进，保留 逻辑位置 → 文档位置 的映射。
+ * 配对的枚举与绘制共用这一份。
+ */
+function logicalParagraph(state: EditorState, para: { from: number; to: number }): { text: string; map: number[] } {
+  const map: number[] = []
+  let text = ''
+  let lineStart = para.from
+  while (lineStart <= para.to) {
+    const lineEnd = Math.min(state.doc.lineAt(lineStart).to, para.to)
+    const line = state.doc.sliceString(lineStart, lineEnd)
+    // 首行从节点起点开始（引用/列表标记不在节点内）；续行要剥掉行首的引用标记与缩进
+    let strip = 0
+    if (lineStart > para.from) {
+      const quote = QUOTE_PREFIX_RE.exec(line)?.[0].length ?? 0
+      const indent = /^[ \t]*/.exec(line.slice(quote))?.[0].length ?? 0
+      strip = quote + indent
+    }
+    for (let j = strip; j < line.length; j++) {
+      map.push(lineStart + j)
+      text += line[j]
+    }
+    if (lineEnd < para.to) {
+      text += '\n'
+      map.push(lineEnd)
+      lineStart = lineEnd + 1
+    } else {
+      break
+    }
+  }
+  return { text, map }
+}
+
+/**
+ * 按宽松规则枚举一段里的全部候选配对（Typora 手感：开侧后一字符非空白、闭侧前一字符
+ * 非空白、`_` 词内不生效），每个开侧配**最近的**合法闭侧。
+ *
+ * onPair 收到每个候选，返回值只用于调用方记账；枚举的推进与返回值无关——
+ * 这样「分析」（决定撤掉哪些错配）与「绘制」（真去画）看到的是同一串候选，永远一致。
+ *
+ * 闭侧候选预计算 + 二分找最近闭侧：落单的开侧（`**x**` 的后一个 `*` 对单 `*` 规则而言）
+ * 以前会把整段扫到头，不空行的长文里是平方级（1500 行的段落每次重算 170ms，
+ * 2026-11-23 量出来的）。闭侧合不合法只看它自己的位置，与开侧无关，所以可以一次列出来。
+ */
+function enumerateLoosePairs(
+  text: string,
+  map: number[],
+  claims: Map<number, { node: number; side: 'open' | 'close'; len: number }>,
+  onPair: (pair: LoosePair) => boolean,
+): void {
+  // 前面紧挨着奇数个反斜杠 = 被转义的定界符（`\*`），不算定界符
+  const escaped = (index: number): boolean => {
+    let backslashes = 0
+    for (let k = index - 1; k >= 0 && text[k] === '\\'; k--) backslashes++
+    return backslashes % 2 === 1
+  }
+  const claimAt = (pos: number, d: number): number => {
+    const hit = claims.get(pos)
+    return hit && hit.len === d ? hit.node : -1
+  }
+
+  for (const spec of LOOSE_SPECS) {
+    const d = spec.delim.length
+    const head = spec.delim[0]
+    const closers: number[] = []
+    for (let j = 0; j + d <= text.length; j++) {
+      if (text[j] !== head || !text.startsWith(spec.delim, j)) continue
+      if (text[j - 1] === head || escaped(j)) continue
+      if (j + d < text.length && text[j + d] === head) continue
+      if (/\s/.test(text[j - 1])) continue
+      if (spec.wordGuard && j + d < text.length && LOOSE_WORD_CHAR.test(text[j + d])) continue
+      closers.push(j)
+    }
+    let i = 0
+    while (i + d <= text.length) {
+      // 开侧不能是 `**` 的后半截（`**加粗**和*斜体*` 里的第二个 `*` 不是斜体的开侧）：
+      // 与闭侧「不能是定界符串的尾巴」对称。以前漏了这一半，那个候选一直存在，只是
+      // 被 occupy 挡着没露出过；修复对绕过 occupy 之后它就冒出来了（2026-11-23 回归里抓到的）。
+      if (text[i] !== head || text[i - 1] === head || !text.startsWith(spec.delim, i) || text[i + d] === head || escaped(i)) { i++; continue }
+      // 开侧：后一个字符存在且不是空白（含换行）
+      if (i + d >= text.length || /\s/.test(text[i + d])) { i++; continue }
+      // `_` 词内不生效：前一个字符是 ASCII 词字符就不当开侧
+      if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(text[i - 1])) { i++; continue }
+      // 最近的合法闭侧：候选里第一个落在开侧之后的（可跨软换行）
+      let lo = 0
+      let hi = closers.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (closers[mid] < i + d + 1) lo = mid + 1
+        else hi = mid
+      }
+      if (lo >= closers.length) { i++; continue }
+      const close = closers[lo]
+      const openFrom = map[i]
+      const closeFrom = map[close]
+      const openClaim = claimAt(openFrom, d)
+      const closeClaim = claimAt(closeFrom, d)
+      const sameNode = openClaim >= 0 && openClaim === closeClaim
+      onPair({
+        from: openFrom,
+        to: closeFrom + d,
+        openFrom,
+        closeFrom,
+        delim: spec.delim,
+        d,
+        cls: spec.cls,
+        openClaim,
+        closeClaim,
+        sameNode,
+        repair: !sameNode && (openClaim >= 0 || closeClaim >= 0),
+      })
+      i = close + d
+    }
+  }
+}
+
+/**
+ * 错配修复分析（宽松方言专用）。要在 collectInline **之前**跑——撤不撤某个节点的加粗、
+ * 它的定界符要不要跟着修复对显形，都是画的时候就要知道的事。
+ *
+ * 背景（2026-11-23 用户报的「一句话里两个加粗，中间被加粗、外层星号成了普通字」）：
+ * 加粗内容以全角标点开头/结尾时（`**“这个”**和**“那个”**`），CommonMark 的侧翼规则
+ * 判定「紧跟 `“` 的 `**` 不能当开侧、前面是 `”` 的不能当闭侧」，于是语法树把中间那对
+ * `**` 配成了强调，外层四个星号成了普通文字。加个空格就能恢复侧翼资格，所以
+ * 「这句话里加个空格才能正常渲染」。
+ *
+ * 修法：宽松枚举按 Typora 规则本来就会把外层配成对；只要某个候选的定界符**恰好**
+ * 是语法树错配节点的标记（而不是它自己那一对的两侧），就照画（修复），并把两侧
+ * 标记被这样占用的错配节点撤掉加粗——正文由修复对重新加粗，中间的连接词回到普通字。
+ * 两侧被同一节点认领的候选（语法树本来就画了）一律不碰，严格配对的行为不变。
+ */
+function analyzeEmphasisRepair(
+  state: EditorState,
+  paragraphs: { from: number; to: number }[],
+  emphasis: EmphasisNode[],
+): { suppress: Set<number>; repairs: LoosePair[] } {
+  const claims = markClaimIndex(emphasis)
+  // 第一遍：收集全部修复候选，数每个节点的标记被占用了几次
+  const candidates: LoosePair[] = []
+  for (const para of paragraphs) {
+    if (para.to <= para.from) continue
+    const { text, map } = logicalParagraph(state, para)
+    enumerateLoosePairs(text, map, claims, (pair) => {
+      if (pair.repair) candidates.push(pair)
+      return true
+    })
+  }
+  // 只有**两个**标记都被修复对占用的节点才是真被错配的（中间那对 `**和**`，或嵌套
+  // 错配的内外两层各被占两次）。只碰到一个标记的，多半是合法配对被路过——不撤它，
+  // 碰它的那个候选也不算修复（回到补画的规则里去）。
+  const consumed = new Map<number, number>()
+  for (const pair of candidates) {
+    if (pair.openClaim >= 0) consumed.set(pair.openClaim, (consumed.get(pair.openClaim) ?? 0) + 1)
+    if (pair.closeClaim >= 0) consumed.set(pair.closeClaim, (consumed.get(pair.closeClaim) ?? 0) + 1)
+  }
+  const swallowed = (node: number): boolean => {
+    const claim = emphasis[node]
+    return !!claim.openMark && !!claim.closeMark && (consumed.get(node) ?? 0) >= 2
+  }
+  const suppress = new Set<number>()
+  const repairs: LoosePair[] = []
+  for (const pair of candidates) {
+    const touchesSwallowed =
+      (pair.openClaim >= 0 && swallowed(pair.openClaim)) || (pair.closeClaim >= 0 && swallowed(pair.closeClaim))
+    if (!touchesSwallowed) continue
+    repairs.push(pair)
+    // 被撤的节点按起点记，collectInline 用它查
+    if (pair.openClaim >= 0 && swallowed(pair.openClaim)) suppress.add(emphasis[pair.openClaim].from)
+    if (pair.closeClaim >= 0 && swallowed(pair.closeClaim)) suppress.add(emphasis[pair.closeClaim].from)
+  }
+  return { suppress, repairs }
+}
+
 function collectLooseEmphasis(
   state: EditorState,
   paragraphs: { from: number; to: number }[],
   occupy: { from: number; to: number }[],
   ranges: DecorationRange[],
   extras: RevealExtra[] = [],
+  emphasis: EmphasisNode[] = [],
+  repairs: readonly LoosePair[] = [],
 ): void {
   // occupy 不是全局有序的（几个收集器各按自己的顺序往里塞）。按 from 排一次，再记一个
   // 「前缀最大 to」：与 [from, to) 相交的区间存在，当且仅当所有 from < to 的区间里最大的
@@ -2290,99 +2556,44 @@ function collectLooseEmphasis(
     }
     return claimedMaxTo[lo] > from
   }
+  const claims = markClaimIndex(emphasis)
+  const repairKeys = new Set(repairs.map((pair) => `${pair.openFrom}:${pair.closeFrom}`))
 
   for (const para of paragraphs) {
     if (para.to <= para.from) continue
-    // 逻辑文本与位置映射：map[i] = 逻辑第 i 个字符在文档里的位置（换行符映到真实换行处）
-    const map: number[] = []
-    let logical = ''
-    let lineStart = para.from
-    while (lineStart <= para.to) {
-      const lineEnd = Math.min(state.doc.lineAt(lineStart).to, para.to)
-      const line = state.doc.sliceString(lineStart, lineEnd)
-      // 首行从节点起点开始（引用/列表标记不在节点内）；续行要剥掉行首的引用标记与缩进
-      let strip = 0
-      if (lineStart > para.from) {
-        const quote = QUOTE_PREFIX_RE.exec(line)?.[0].length ?? 0
-        const indent = /^[ \t]*/.exec(line.slice(quote))?.[0].length ?? 0
-        strip = quote + indent
-      }
-      for (let j = strip; j < line.length; j++) {
-        map.push(lineStart + j)
-        logical += line[j]
-      }
-      if (lineEnd < para.to) {
-        logical += '\n'
-        map.push(lineEnd)
-        lineStart = lineEnd + 1
-      } else {
-        break
-      }
-    }
-
+    const { text, map } = logicalParagraph(state, para)
     // 已画上的区间（本函数产出），单 `*` 不能跨过 `**` 配对
     const painted: { from: number; to: number }[] = []
-    const blocked = (from: number, to: number) =>
-      overlaps(from, to) || painted.some((span) => from < span.to && to > span.from)
-    // 前面紧挨着奇数个反斜杠 = 被转义的定界符（`\*`），不算定界符
-    const escaped = (index: number): boolean => {
-      let backslashes = 0
-      for (let k = index - 1; k >= 0 && logical[k] === '\\'; k--) backslashes++
-      return backslashes % 2 === 1
-    }
 
-    for (const spec of LOOSE_SPECS) {
-      const d = spec.delim.length
-      const head = spec.delim[0]
-      // 这一段里所有「能当闭侧」的位置，升序，所有开侧共用。
-      //
-      // 以前是从开侧起一个字符一个字符往后扫到找到为止。落单的开侧——`**x**` 的后一个 `*`
-      // 在单 `*` 规则眼里就是——会把整段扫到头，一段里每多一个落单的开侧就多扫一遍全文。
-      // 不空行的长文（一句一行的写法整篇就是一个段落）里全是这种结构：1500 行的段落
-      // 每次重算 170ms，而每敲一个字都要重算（2026-11-23 的大文档回归里量出来的）。
-      // 闭侧合不合法只看它自己的位置，与开侧无关，所以可以一次列出来。
-      const closers: number[] = []
-      for (let j = 0; j + d <= logical.length; j++) {
-        if (logical[j] !== head || !logical.startsWith(spec.delim, j)) continue
-        if (logical[j - 1] === head || escaped(j)) continue
-        if (j + d < logical.length && logical[j + d] === head) continue
-        if (/\s/.test(logical[j - 1])) continue
-        if (spec.wordGuard && j + d < logical.length && LOOSE_WORD_CHAR.test(logical[j + d])) continue
-        closers.push(j)
+    enumerateLoosePairs(text, map, claims, (pair) => {
+      // 语法树本来就画了这一对：不碰（它的装饰由 collectInline 出）
+      if (pair.sameNode) return false
+      const isRepair = repairKeys.has(`${pair.openFrom}:${pair.closeFrom}`)
+      // 修复对不检查 occupy——它与语法树的交集只在定界符上（错配节点的标记），
+      // 内容是干净的。补画对（两侧都没被认领）仍按老规矩：与任何认领区间相交就不画。
+      if (!isRepair && (overlaps(pair.from, pair.to) || painted.some((span) => pair.from < span.to && pair.to > span.from))) {
+        return false
       }
-      let i = 0
-      while (i + d <= logical.length) {
-        if (logical[i] !== head || !logical.startsWith(spec.delim, i) || logical[i + d] === head || escaped(i)) { i++; continue }
-        // 开侧：后一个字符存在且不是空白（含换行）
-        if (i + d >= logical.length || /\s/.test(logical[i + d])) { i++; continue }
-        // `_` 词内不生效：前一个字符是 ASCII 词字符就不当开侧
-        if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(logical[i - 1])) { i++; continue }
-        // 从最近的合法闭侧里挑：候选里第一个落在开侧之后的（可跨软换行）
-        let lo = 0
-        let hi = closers.length
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1
-          if (closers[mid] < i + d + 1) lo = mid + 1
-          else hi = mid
-        }
-        if (lo >= closers.length) { i++; continue }
-        const close = closers[lo]
-        const from = map[i]
-        const to = map[close] + d
-        if (!blocked(from, to)) {
-          const closeAt = map[close]
-          // 光标在这段强调里（或紧贴两端）时定界符压淡显形，可以就地改（与合法强调同一手感）
-          const shown = within(state, from, to)
-          const delim = shown ? MARK({ class: 'cm-md-marker' }) : null
-          extras.push({ from, to })
-          ranges.push({ from, to: from + d, deco: delim ?? hide(from, from + d) })
-          ranges.push({ from: closeAt, to: closeAt + d, deco: delim ?? hide(closeAt, closeAt + d) })
-          ranges.push({ from: from + d, to: closeAt, deco: MARK({ class: spec.cls }) })
-          painted.push({ from, to })
-        }
-        i = close + d
+      // 光标在这段强调里（或紧贴两端）时定界符压淡显形，可以就地改（与合法强调同一手感）
+      const shown = within(state, pair.from, pair.to)
+      const delim = shown ? MARK({ class: 'cm-md-marker' }) : null
+      extras.push({ from: pair.from, to: pair.to })
+      // 被语法树标记占用的那半个定界符由 collectInline 的标记分支负责藏/显，
+      // 这里不再叠一份 replace——两份替换撞同一区间是没定义的行为
+      const claimLen = (pos: number): number | undefined => {
+        const hit = claims.get(pos)
+        return hit && hit.len === pair.d ? hit.len : undefined
       }
-    }
+      if (claimLen(pair.openFrom) === undefined) {
+        ranges.push({ from: pair.openFrom, to: pair.openFrom + pair.d, deco: delim ?? hide(pair.openFrom, pair.openFrom + pair.d) })
+      }
+      if (claimLen(pair.closeFrom) === undefined) {
+        ranges.push({ from: pair.closeFrom, to: pair.closeFrom + pair.d, deco: delim ?? hide(pair.closeFrom, pair.closeFrom + pair.d) })
+      }
+      ranges.push({ from: pair.openFrom + pair.d, to: pair.closeFrom, deco: MARK({ class: pair.cls }) })
+      painted.push({ from: pair.from, to: pair.to })
+      return true
+    })
   }
 }
 
@@ -2471,11 +2682,18 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   const dialect = dialectOf(state)
   // 宽松强调要避开的区间：合法强调/代码/链接由 collectInline 记，公式与高亮在下面记
   const occupy: { from: number; to: number }[] = []
-  const paragraphs: { from: number; to: number }[] = []
   // 正则类的可披露构造（高亮、宽松强调、成对行内 HTML、脚注引用），见 revealKeyOf
   const extras: RevealExtra[] = []
   // 整段被换成 widget 的行内构造（图片、公式）：别的正则语法（高亮）不许跨过去配对
   const opaque: { from: number; to: number }[] = []
+  const paragraphs = collectParagraphs(state, front)
+  // 错配修复分析要在 collectInline 之前跑完：哪些节点的加粗要撤、它的定界符要不要跟着
+  // 修复对显形，都是 collectInline 画的时候就要知道的事（见 analyzeEmphasisRepair）。
+  // 严格方言（宽松强调关闭）不做修复，纯 CommonMark 行为。
+  const emphasisNodes = dialect.looseEmphasis ? collectEmphasisNodes(state, front) : []
+  const repair = dialect.looseEmphasis
+    ? analyzeEmphasisRepair(state, paragraphs, emphasisNodes)
+    : { suppress: new Set<number>(), repairs: [] as LoosePair[] }
 
   if (flash && flash.to <= state.doc.length) {
     ranges.push({ from: flash.from, to: flash.to, deco: MARK({ class: 'cm-md-jump-flash' }) })
@@ -2487,17 +2705,30 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   collectHTML(state, ranges, front, zones, occupy, extras)
   collectImages(state, ranges, front, occupy, opaque)
   collectPages(state, ranges, front)
-  collectInline(state, ranges, front, occupy, paragraphs)
+  collectInline(state, ranges, front, occupy, repair.suppress, repair.repairs)
   collectFrontmatter(state, ranges, front, zones)
   collectTables(state, ranges, front, zones)
   collectTaskItems(state, ranges, front)
   collectMermaid(state, text, ranges, front, zones)
   // 公式先于高亮：它整段被换成 widget，区间要先记进 opaque，高亮的 `==` 才知道不能
   // 跨过去配对。入队的先后不要紧，组装前统一排序。
-  collectMath(state, text, excluded, ranges, zones, dialect.inlineMath, occupy, opaque)
+  const widgetMath: { from: number; to: number }[] = []
+  collectMath(state, text, excluded, ranges, zones, dialect.inlineMath, occupy, opaque, widgetMath)
   collectHighlight(state, text, ranges, excluded, dialect.highlight, occupy, extras, opaque)
-  // 宽松强调垫底：所有合法区间都记完之后才知道哪些空档可以补画
-  if (dialect.looseEmphasis) collectLooseEmphasis(state, paragraphs, occupy, ranges, extras)
+  // 宽松强调垫底：所有合法区间都记完之后才知道哪些空档可以补画、哪些错配要修复
+  if (dialect.looseEmphasis) collectLooseEmphasis(state, paragraphs, occupy, ranges, extras, emphasisNodes, repair.repairs)
+  // 完全落在公式 widget 区间内部的隐藏装饰，滤掉。它们是嵌在 replace 里的又一层
+  // replace（`\(` 的 Escape 藏、公式里被树认领的强调标记…），widget 态下本来就不可见，
+  // 滤掉不改任何像素；留着却会让 CodeMirror 的增量 DOM diff 在「源码态 → widget 态」
+  // 切换时把整个 widget 丢掉——`\(公式\)` 在行首、光标进出公式时整段渲染成空
+  // （2026-11-23 用户报「行内公式不能正常渲染」的其中一条路径，逐时序排查出来的）。
+  if (widgetMath.length > 0) {
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      const entry = ranges[i]
+      if (!hiddenDecos.has(entry.deco)) continue
+      if (widgetMath.some((span) => entry.from >= span.from && entry.to <= span.to)) ranges.splice(i, 1)
+    }
+  }
 
   // 排序键必须带上 startSide：RangeSetBuilder 只接受按 (from, startSide) 递增的顺序，
   // 原来只按 (from, to) 排，同一段区间上挂了两种装饰时就翻车。

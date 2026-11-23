@@ -194,9 +194,15 @@ function scanLatexDelim(src: string, pos: number): MathRange | null {
   if (end === -1) return null
 
   const code = src.slice(bodyStart, end)
-  if (!code.trim() || !LATEX_SIGNAL.test(code)) return null
+  if (!code.trim()) return null
   // 行内形式：开头后不能紧跟空白，结尾前不能紧贴空白（与 `$...$` 的规则一致）
   if (open === '(' && (isSpace(code[0]) || isSpace(code[code.length - 1]))) return null
+  // 信号判定。块形式 `\[...\]` 保持严格：`\[1\]` 这类学术引用长得一模一样，没信号不算公式。
+  // 行内形式 `\(...\)`（GPT 等模型爱用）放宽：内容是短短一截「数学味」字符（字母数字、
+  // 运算符、括号、点，没有逗号引号分号这些 CSV/散文分隔符）也算——`\(x\)`、`\(a+b\)`
+  // 没有信号，但写 `\(` 的人几乎不会是在写散文（2026-11-23 用户报「行内公式不能渲染」）。
+  const plainMath = open === '(' && code.length <= 40 && !/["',;:，。；：]/.test(code)
+  if (!LATEX_SIGNAL.test(code) && !plainMath) return null
 
   return {
     from: pos,

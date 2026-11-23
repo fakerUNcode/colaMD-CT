@@ -24,6 +24,7 @@ export type FormatCommandId =
   | 'inlineCode'
   | 'strikethrough'
   | 'highlight'
+  | 'mathInline'
   | 'link'
   // 标题
   | 'heading1'
@@ -61,6 +62,7 @@ const WRAP_COMMANDS: Record<string, MarkerSpec> = {
   inlineCode: { open: '`', close: '`' },
   strikethrough: { open: '~~', close: '~~' },
   highlight: { open: '==', close: '==' },
+  mathInline: { open: '$', close: '$' },
 }
 
 /** 选区是否已经被这对标记包裹（含标记自身被选中一半的情况）。 */

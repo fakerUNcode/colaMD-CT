@@ -1736,6 +1736,26 @@ function main() {
       check('大纲不吃代码块里的 #',
         outlineTexts.includes('一级标题') && !outlineTexts.some((t) => t.includes('不该进大纲')),
         `大纲条目=${JSON.stringify(outlineTexts)} 诊断=${JSON.stringify(outlineDiag)}`)
+      // ColaMD CT（2026-11-23 修「大纲高亮不跟随」）：正文实际滚在 CodeMirror 的
+      // .cm-scroller 上，scroll 监听此前挂在 #editor 上永远收不到。点第二项跳过去，
+      // 再手动滚到底，高亮必须跟到最后一项。
+      {
+        const followed = JSON.parse(await evaluate(renderer, `(async () => {
+          const buttons = [...document.querySelectorAll('#outline-list button')]
+          if (buttons.length < 3) return JSON.stringify({ skip: true, n: buttons.length })
+          buttons[1].click()
+          await new Promise((r) => setTimeout(r, 1200))
+          const afterClick = [...document.querySelectorAll('#outline-list button')].findIndex((b) => b.classList.contains('active'))
+          const scroller = document.querySelector('#editor .cm-scroller')
+          scroller.scrollTop = scroller.scrollHeight
+          await new Promise((r) => setTimeout(r, 800))
+          const afterScroll = [...document.querySelectorAll('#outline-list button')].findIndex((b) => b.classList.contains('active'))
+          return JSON.stringify({ skip: false, afterClick, afterScroll, last: buttons.length - 1, scrolled: scroller.scrollTop > 0 })
+        })()`))
+        check('大纲高亮跟随正文滚动（跳转后继续往下读，高亮跟到后面的章节）',
+          followed.skip || (followed.afterScroll === followed.last && followed.afterScroll !== followed.afterClick && followed.scrolled),
+          JSON.stringify(followed))
+      }
       await evaluate(renderer, `document.getElementById('file-panel-files').click()`)
       await sleep(200)
 
