@@ -28,6 +28,11 @@ export const EDITOR_COMMANDS: readonly EditorCommandSpec[] = [
   { id: 'strikethrough', zh: '删除线', en: 'Strikethrough', accelerator: 'CmdOrCtrl+Shift+X', group: 'inline' },
   { id: 'highlight', zh: '高亮', en: 'Highlight', accelerator: 'CmdOrCtrl+Shift+H', group: 'inline' },
   { id: 'mathInline', zh: '行内公式', en: 'Inline Math', accelerator: 'CmdOrCtrl+Shift+J', group: 'inline' },
+  // 键位写物理键：美式键盘上 Shift+6 就是 `^`、Shift+` 就是 `~`（Typora 的
+  // Ctrl+Shift+^ / Ctrl+Shift+~）。改绑捕获存的也是物理键形式，三层（改绑列表、
+  // DOM 匹配、原生菜单）才对得上同一个键。
+  { id: 'superscript', zh: '上标', en: 'Superscript', accelerator: 'CmdOrCtrl+Shift+6', group: 'inline' },
+  { id: 'subscript', zh: '下标', en: 'Subscript', accelerator: 'CmdOrCtrl+Shift+`', group: 'inline' },
   { id: 'link', zh: '链接（网址取自剪贴板）', en: 'Link (URL from clipboard)', accelerator: 'CmdOrCtrl+K', group: 'inline' },
   // --- 标题 ---
   { id: 'heading1', zh: '一级标题', en: 'Heading 1', accelerator: 'CmdOrCtrl+1', group: 'heading' },
@@ -51,6 +56,8 @@ export const EDITOR_COMMANDS: readonly EditorCommandSpec[] = [
   { id: 'image', zh: '插入图片…', en: 'Insert Image…', accelerator: 'CmdOrCtrl+Shift+I', group: 'insert' },
   { id: 'table', zh: '插入表格…', en: 'Insert Table…', accelerator: 'CmdOrCtrl+Shift+T', group: 'insert' },
   { id: 'hr', zh: '水平分割线', en: 'Horizontal Rule', accelerator: 'CmdOrCtrl+Shift+-', group: 'insert' },
+  // 脚注：Typora 没有默认键，借 Word 的「插入脚注」Ctrl+Alt+F
+  { id: 'footnote', zh: '脚注', en: 'Footnote', accelerator: 'CmdOrCtrl+Alt+F', group: 'insert' },
 ]
 
 const BY_ID = new Map(EDITOR_COMMANDS.map((command) => [command.id, command]))

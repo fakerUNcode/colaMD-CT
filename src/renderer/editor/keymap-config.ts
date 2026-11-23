@@ -17,12 +17,24 @@ import { runFormatCommand, type FormatCommandId } from './format-commands'
 let bindings = new Map<string, FormatCommandId>()
 let installed = false
 
+/**
+ * 符号键 → 物理键（美式键盘）。改绑捕获存的本来就是物理键形式；但手写进
+ * settings.json 的加速键可能是按字符写的（`Ctrl+Shift+^`、`Ctrl+Shift+Backquote`），
+ * 归一到物理键之后才和键盘事件的规范形式对得上。
+ */
+const PHYSICAL_KEY: Record<string, string> = {
+  '+': '=', plus: '=', '~': '`', backquote: '`',
+  '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+  '_': '-', minus: '-', equal: '=', '{': '[', '}': ']', '|': '\\', ':': ';', '"': "'",
+  '<': ',', '>': '.', '?': '/', space: 'space',
+}
+
 /** accelerator 的键位部分先归一到物理键：`+` 在键盘上就是 `=`（Shift+=）。 */
 function normalizeForLookup(accelerator: string): string {
   const normalized = normalizeAccelerator(accelerator)
   const parts = normalized.split('+')
   const key = parts.pop() ?? ''
-  const mapped = key === '+' || key === 'plus' ? '=' : key
+  const mapped = PHYSICAL_KEY[key] ?? key
   return [...parts, mapped].join('+')
 }
 

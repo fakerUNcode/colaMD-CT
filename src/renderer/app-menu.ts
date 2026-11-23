@@ -139,7 +139,8 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
         sep(zh ? '行内' : 'Inline'),
         command('bold', zh), command('italic', zh), command('underline', zh),
         command('inlineCode', zh), command('strikethrough', zh), command('highlight', zh),
-        command('mathInline', zh),
+        command('mathInline', zh), command('superscript', zh), command('subscript', zh),
+        command('footnote', zh),
         {
           label: zh ? '标题' : 'Heading',
           items: () => [
@@ -156,6 +157,7 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
       return [
         command('link', zh), command('image', zh), command('table', zh),
         command('mathBlock', zh), command('codeBlock', zh), command('hr', zh),
+        command('footnote', zh),
       ]
     case 'view':
       return [

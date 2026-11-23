@@ -25,6 +25,8 @@ export type FormatCommandId =
   | 'strikethrough'
   | 'highlight'
   | 'mathInline'
+  | 'superscript'
+  | 'subscript'
   | 'link'
   // 标题
   | 'heading1'
@@ -48,6 +50,7 @@ export type FormatCommandId =
   | 'image'
   | 'table'
   | 'hr'
+  | 'footnote'
 
 interface MarkerSpec {
   /** 包裹式标记：起止可以不同（下划线是 <u>…</u>）。 */
@@ -63,6 +66,10 @@ const WRAP_COMMANDS: Record<string, MarkerSpec> = {
   strikethrough: { open: '~~', close: '~~' },
   highlight: { open: '==', close: '==' },
   mathInline: { open: '$', close: '$' },
+  // 上下标走行内 HTML（渲染层认 cm-md-html-sup / -sub），与 Typora 的 `^…^` / `~…~`
+  // 写法不同：那两个定界符在这里分别撞上宽松强调与删除线，不采用
+  superscript: { open: '<sup>', close: '</sup>' },
+  subscript: { open: '<sub>', close: '</sub>' },
 }
 
 /** 选区是否已经被这对标记包裹（含标记自身被选中一半的情况）。 */
@@ -234,6 +241,39 @@ function insertHr(view: EditorView): void {
   view.focus()
 }
 
+/** 下一个可用的脚注编号：全文已有的 `[^数字]`（引用与定义都算）里取最大值加一。 */
+function nextFootnoteNumber(view: EditorView): number {
+  let max = 0
+  for (const match of view.state.doc.toString().matchAll(/\[\^(\d+)\]/g)) max = Math.max(max, Number(match[1]))
+  return max + 1
+}
+
+/**
+ * 插入脚注（Typora 的手感）：光标处——有选区就是选区末尾——插入引用 `[^n]`，
+ * 在文末另起一段补上定义 `[^n]: `，光标落到定义里等着写说明。
+ *
+ * 两处在同一个事务里写入，撤销时一起撤；位置都用改动前的坐标（CodeMirror 的
+ * changes 数组是按原文坐标给的）。
+ */
+function insertFootnote(view: EditorView): void {
+  const { to } = view.state.selection.main
+  const label = `[^${nextFootnoteNumber(view)}]`
+  const tail = view.state.doc.toString()
+  // 定义前要隔一个空行：数一下文末已有几个换行，不够就补
+  const trailing = tail.length - tail.replace(/\n+$/, '').length
+  const separator = tail && trailing < 2 ? '\n'.repeat(2 - trailing) : ''
+  const definition = `${label}: `
+  // 光标落点的换算：引用插在前面，把它后面的内容（含定义）整体往后推了 label.length
+  const definitionEnd = tail.length + label.length + separator.length + definition.length
+  view.dispatch({
+    changes: [{ from: to, insert: label }, { from: tail.length, insert: separator + definition }],
+    selection: { anchor: definitionEnd },
+    scrollIntoView: true,
+    userEvent: 'input',
+  })
+  view.focus()
+}
+
 /** 给选区包一条链接。URL 由调用方从主进程剪贴板取到后传入。 */
 export function wrapLink(view: EditorView, url: string): void {
   const { from, to } = view.state.selection.main
@@ -306,6 +346,10 @@ export function runFormatCommand(view: EditorView, id: FormatCommandId): void {
   }
   if (id === 'hr') {
     insertHr(view)
+    return
+  }
+  if (id === 'footnote') {
+    insertFootnote(view)
     return
   }
   const headingLevel = /^heading([1-6])$/.exec(id)

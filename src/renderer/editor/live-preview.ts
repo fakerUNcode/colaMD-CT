@@ -1655,6 +1655,11 @@ function collectFootnotes(
     const to = from + match[0].length
     if (front && inRange(front, from)) continue
     if (definitions.has(match[1]) === false && numbers.has(match[1]) === false) continue
+    // 定义行行首的标签（`[^1]: 说明`）不是引用：留着原文，整行压淡（下面的定义行分支）。
+    // 以前它也被换成上标数字，定义行读起来是「¹: 说明」——与「定义行压淡、不隐藏」
+    // 的本意相反（2026-11-23 加脚注命令时查出来的）。正文里紧跟冒号的引用不受影响。
+    const line = state.doc.lineAt(from)
+    if (text[to] === ':' && from - line.from <= 3 && /^\s*$/.test(line.text.slice(0, from - line.from))) continue
     // 光标在这条脚注引用上（或紧贴两端）时不换成上标数字，源码 `[^note]` 就地可改；
     // 查找的当前项落在它里面时同样退回源码（上标数字里没有这段文字，高亮落不上去）
     extras.push({ from, to })
