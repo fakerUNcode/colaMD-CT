@@ -11,8 +11,31 @@
 import { Decoration, EditorView, type DecorationSet } from '@codemirror/view'
 import { RangeSetBuilder, type StateEffect } from '@codemirror/state'
 import { getEditorView } from './editor'
-import { setSearchHighlight } from './search-highlight'
+import { setSearchHighlight, setSearchState, type SearchMatch } from './search-highlight'
 import { getUiLanguage, type UiLanguage } from '../ui-language'
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 不区分大小写地找出全部匹配（互不重叠），位置以 UTF-16 码元计（与 CodeMirror 一致）。
+ *
+ * 直接在原文上找。以前是「整篇 toLowerCase() 再数下标」——个别字符小写之后长度会变
+ * （İ → i̇，两个码元），从那一处往后所有匹配的位置都偏了，替换就替到错的地方。
+ * 不重叠：重叠的匹配（在 aaa 里找 aa）画高亮没问题，但「全部替换」会生成互相
+ * 重叠的改动，CodeMirror 直接报错。
+ */
+export function findSearchMatches(text: string, query: string): SearchMatch[] {
+  const matches: SearchMatch[] = []
+  const pattern = new RegExp(escapeRegExp(query), 'gi')
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(text)) !== null) {
+    matches.push({ from: match.index, to: match.index + match[0].length })
+    if (match[0].length === 0) pattern.lastIndex++
+  }
+  return matches
+}
 
 export class SearchPanel {
   private container: HTMLDivElement
@@ -25,7 +48,7 @@ export class SearchPanel {
   private prevButton: HTMLButtonElement
   private nextButton: HTMLButtonElement
   private closeButton: HTMLButtonElement
-  private matches: { from: number; to: number }[] = []
+  private matches: SearchMatch[] = []
   private currentIndex = -1
   private visible = false
 
@@ -169,7 +192,7 @@ export class SearchPanel {
     const sourceEditor = this.getSourceEditor()
     const replacement = this.replaceInput.value
     if (sourceEditor) {
-      sourceEditor.value = sourceEditor.value.replace(new RegExp(this.escapeRegExp(query), 'gi'), () => replacement)
+      sourceEditor.value = sourceEditor.value.replace(new RegExp(escapeRegExp(query), 'gi'), () => replacement)
       sourceEditor.dispatchEvent(new Event('input', { bubbles: true }))
       this.searchSourceEditor(query, sourceEditor)
       return
@@ -184,11 +207,6 @@ export class SearchPanel {
     view.dispatch({ changes })
     this.search()
   }
-
-  private escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-
   private btn(text: string, className: string, onClick: () => void): HTMLButtonElement {
     const button = document.createElement('button')
     button.textContent = text
@@ -217,13 +235,7 @@ export class SearchPanel {
       return
     }
 
-    const lowerQuery = query.toLowerCase()
-    const text = view.state.doc.toString().toLowerCase()
-    let idx = 0
-    while ((idx = text.indexOf(lowerQuery, idx)) !== -1) {
-      this.matches.push({ from: idx, to: idx + query.length })
-      idx += 1
-    }
+    this.matches = findSearchMatches(view.state.doc.toString(), query)
 
     if (this.matches.length > 0) {
       this.currentIndex = 0
@@ -249,13 +261,7 @@ export class SearchPanel {
       return
     }
 
-    const lowerQuery = query.toLowerCase()
-    const text = sourceEditor.value.toLowerCase()
-    let idx = 0
-    while ((idx = text.indexOf(lowerQuery, idx)) !== -1) {
-      this.matches.push({ from: idx, to: idx + query.length })
-      idx += 1
-    }
+    this.matches = findSearchMatches(sourceEditor.value, query)
 
     if (this.matches.length > 0) {
       this.currentIndex = 0
@@ -271,6 +277,10 @@ export class SearchPanel {
    * 而 `#editor` 早就不动了（换内核时漏改，2026-10-03 报的「按下一个不跳」）。
    * 另外远处的匹配项还没渲染进 DOM，`coordsAtPos()` 会返回 null，自己算等于直接放弃；
    * CM6 这条路会先把目标行纳入视口再滚，因此不受渲染范围限制。
+   *
+   * 匹配的位置同时交给渲染层（setSearchState）：表格 widget 在单元格里自己画高亮，
+   * 公式 / 图 / HTML 块命中时退回源码——标记装饰只对页面上真实存在的文字有用，
+   * 而这些块里的文字是被 widget 换掉了的。
    */
   private highlight(view: NonNullable<ReturnType<typeof getEditorView>>, scroll = false): void {
     const builder = new RangeSetBuilder<Decoration>()
@@ -278,7 +288,10 @@ export class SearchPanel {
       const className = index === this.currentIndex ? 'search-match-current' : 'search-match'
       builder.add(match.from, match.to, Decoration.mark({ class: className }))
     })
-    const effects: StateEffect<unknown>[] = [setSearchHighlight.of(builder.finish())]
+    const effects: StateEffect<unknown>[] = [
+      setSearchHighlight.of(builder.finish()),
+      setSearchState.of({ matches: this.matches, current: this.currentIndex }),
+    ]
     const current = this.matches[this.currentIndex]
     if (scroll && current) effects.push(EditorView.scrollIntoView(current.from, { y: 'center' }))
     view.dispatch({ effects })
@@ -287,7 +300,7 @@ export class SearchPanel {
   private clearDecorations(): void {
     const view = getEditorView()
     if (!view) return
-    view.dispatch({ effects: setSearchHighlight.of(Decoration.none) })
+    view.dispatch({ effects: [setSearchHighlight.of(Decoration.none), setSearchState.of(null)] })
   }
 
   private next(): void {

@@ -390,7 +390,7 @@ function tableWidgetOf(target: EventTarget | null): HTMLElement | null {
  * 会整块退回 markdown 源码（#153 报的）。
  *
  * 行从点到的 `<tr>` 数，列从点到的 `<td>` 数，再按源码里未转义的 `|` 对齐；
- * 拆法与 live-preview 的 parseTable 保持一致（`\|` 不算分隔符）。
+ * 拆法与 live-preview 的 parseTableCells 保持一致（`\|` 不算分隔符）。
  */
 function tableCellAnchor(view: EditorView, widget: HTMLElement, e: MouseEvent): number | null {
   const target = e.target

@@ -28,6 +28,7 @@ import type { SyntaxNode, SyntaxNodeRef } from '@lezer/common'
 import katex from 'katex'
 import { scanMath, excludedRanges, frontmatterRange, type Excluded, type MathRange } from './math-scan'
 import { renderMermaid, attachDiagramZoom, detachDiagramZoom, isDiagramZoomed } from './mermaid-bridge'
+import { searchStateField } from './search-highlight'
 import { sanitizeHTML, cleanStyle } from './html-sanitize'
 import { footnoteDefinitions, footnoteNumbers, FOOTNOTE_REF_RE } from './footnotes'
 import { isChinese } from '../ui-language'
@@ -228,9 +229,10 @@ function iterateContent(
 /**
  * 编辑器当前是否有焦点。
  *
- * 「光标所在行显示源码」是给**正在编辑**的那一行用的。但打开文件时 CodeMirror 的默认光标
- * 就在第 0 位，于是第一行会一直显示 `# **标题**` 这样的源码：用户没点过它，看起来就是个
- * bug（2026-09-26 报的）。所以判据里加上焦点：没有焦点，就没有「正在编辑」的那一行。
+ * 光标处的标记披露（见 revealEnabled）是给**正在编辑**的人用的。但打开文件时 CodeMirror
+ * 的光标就在正文开头，于是第一行的 `#` 会一直露着：用户没点过它，看起来就是个 bug
+ * （2026-09-26 报的，当时是「第一行一直显示源码」）。所以判据里加上焦点：没有焦点，
+ * 就没有正在编辑的构造。
  */
 export const setEditorFocus = StateEffect.define<boolean>()
 
@@ -452,25 +454,162 @@ function exportingCleanly(state: EditorState): boolean {
   return state.field(cleanExportField, false) ?? false
 }
 
-/**
- * 判断某个位置是否落在光标/选区所在的行上。
- * 判断粒度是「行」而不是「精确区间」：光标所在的这一行，标记全部显形，
- * 这样用户点一下就能看到并修改原始语法，不需要精确点到标记上。
- */
-/**
- * 什么时候把标记的源码露出来：**永远不露**。
- *
- * 曾经是「光标所在的那一行露源码，方便改标记」（2026-09-26 定的）。2026-10-06 取消：
- * 渲染模式就该是一篇干净的排版，要改标记直接去源码模式（⌘/）。两个函数留着，是因为
- * 十来处调用点表达的都是同一件事，改判据只需要动这里。
- */
-function isActiveLine(_state: EditorState, _pos: number): boolean {
-  return false
+// ─── 光标处披露标记（ColaMD CT，2026-11-23）──────────────────────────────────
+//
+// 上游在 2026-10-06 定成「渲染模式永远不露标记」，要改 `**` 只能切源码模式；更早
+// 以前则是「光标所在的那一行整行露源码」，后来因为太吵被取消。这里按用户要求做成
+// Typora 的手感——**按构造披露**：光标落在哪个构造上，只有那个构造的标记临时显形
+// （压淡成 --text-muted），同一行其它地方的加粗、链接保持干净的排版；光标移开即隐藏。
+//
+//   强调 / 行内代码 / 高亮 / 转义 / 成对行内标签：光标在构造内，或紧贴它的两端
+//   链接：光标在链接文字里面（只是挨着链接时不把网址翻出来）
+//   图片：光标在图片源码的开头（信息卡「编辑地址」把光标放的那里）
+//   标题的 #、列表的 -、引用的 >：光标在标记上，或紧贴标记之后
+//
+// 纯装饰，缓冲区不动。只有**正在编辑**时才披露（编辑器有焦点、可编辑）——打开文件时
+// 光标本来就在正文开头，第一行的 `#` 不该自己冒出来。导出、放映（编辑器只读）时也
+// 不披露：纸上的、幕上的都不该带标记。
+//
+// 装饰的重算门（livePreviewField）靠 revealKeyOf 判断「光标换了一个构造」才重算，
+// 在构造内部逐字移动不重算。
+
+/** 这些语法树节点的标记会随光标显形。 */
+const REVEAL_NODES = new Set([
+  'Emphasis', 'StrongEmphasis', 'Strikethrough', 'InlineCode', 'Link', 'Image', 'Autolink', 'Escape',
+  'HeaderMark', 'ListMark', 'QuoteMark',
+])
+
+/** 此刻能不能披露：编辑器有焦点且可编辑才披露；导出与放映时不披露。 */
+function revealEnabled(state: EditorState): boolean {
+  return editorFocused(state) && !exportingCleanly(state) && state.facet(EditorView.editable) !== false
 }
 
-/** 行内的替换区间（链接地址、图片源码）不在露源码之列：那些文字本来就在眼前。 */
-function isActiveRange(_state: EditorState, _from: number, _to: number): boolean {
-  return false
+/** 光标（空选区）或选区整体是否落在 [from, to] 里，两端都算。 */
+function within(state: EditorState, from: number, to: number): boolean {
+  if (!revealEnabled(state)) return false
+  const sel = state.selection.main
+  return sel.from >= from && sel.to <= to
+}
+
+/** 行首标记连它后面那个空格一起算的终点。`markTo` 是标记自己的终点。 */
+function lineMarkEnd(state: EditorState, markTo: number): number {
+  const next = markTo < state.doc.length ? state.doc.sliceString(markTo, markTo + 1) : ''
+  return next === ' ' || next === '\t' ? markTo + 1 : markTo
+}
+
+/**
+ * 某个可披露构造此刻是否披露。重算门（revealKeyOf）与各收集器共用这一个判据，
+ * 两边永远给出同一个答案。
+ */
+function constructRevealed(state: EditorState, node: SyntaxNode): boolean {
+  if (!REVEAL_NODES.has(node.name)) return false
+  switch (node.name) {
+    case 'Link':
+      // 光标在链接文字里面才翻出 `[文字](网址)`；只是挨着链接时不翻
+      return within(state, node.from + 1, node.to - 1)
+    case 'Image':
+      // 光标在图片源码的开头才退回源码（信息卡「编辑地址」放光标的位置）；
+      // 紧跟在图片后面打字时图片照常显示
+      return within(state, node.from, node.to - 1)
+    case 'HeaderMark':
+    case 'ListMark':
+    case 'QuoteMark': {
+      const lineFrom = state.doc.lineAt(node.from).from
+      return within(state, lineFrom, lineMarkEnd(state, node.to))
+    }
+    default:
+      return within(state, node.from, node.to)
+  }
+}
+
+/** 正则类的可披露构造（高亮、宽松强调、成对行内 HTML、脚注引用）——它们不在语法树里。 */
+interface RevealExtra {
+  from: number
+  to: number
+}
+
+const extrasByDeco = new WeakMap<DecorationSet, RevealExtra[]>()
+
+/**
+ * 当前选区下「哪些构造披露着」的指纹。指纹没变，装饰就不必重算。
+ *
+ * 必须与各收集器问出同一个答案，否则会出现「判据说披露、门却没放行」的陈旧装饰。
+ * 所以这里不猜几何，直接把可能披露的节点问一遍：
+ *   - 选区在同一行：枚举**这一行上碰到的所有节点**。不能只从光标往上找祖先——
+ *     带缩进的标题 / 子列表项（`  # 标题`）里，光标停在缩进上时，`#` 是光标所在
+ *     块的后代而不是祖先，往上找不到。
+ *   - 选区跨行：能披露的构造必然整个包住选区（见 within），也就是两端点的祖先。
+ * 正则类的构造（高亮、宽松强调、成对行内 HTML、脚注引用）不在语法树里，直接比对区间。
+ */
+function revealKeyOf(state: EditorState, extras: RevealExtra[]): string {
+  if (!revealEnabled(state)) return ''
+  const parts: string[] = []
+  const visit = (name: string, from: number, to: number, node: SyntaxNode): void => {
+    if (REVEAL_NODES.has(name) && constructRevealed(state, node)) parts.push(`${name}:${from}:${to}`)
+  }
+  const sel = state.selection.main
+  const tree = syntaxTree(state)
+  const firstLine = state.doc.lineAt(sel.from)
+  const lastLine = state.doc.lineAt(sel.to)
+  if (firstLine.number === lastLine.number) {
+    tree.iterate({
+      from: firstLine.from,
+      to: firstLine.to,
+      enter: (node) => {
+        visit(node.name, node.from, node.to, node.node)
+      },
+    })
+  } else {
+    for (const pos of [sel.from, sel.to]) {
+      for (const side of [1, -1] as const) {
+        let node: SyntaxNode | null = tree.resolveInner(pos, side)
+        while (node) {
+          visit(node.name, node.from, node.to, node)
+          node = node.parent
+        }
+      }
+    }
+  }
+  for (const extra of extras) {
+    if (sel.from >= extra.from && sel.to <= extra.to) parts.push(`x:${extra.from}:${extra.to}`)
+  }
+  return parts.join('|')
+}
+
+/**
+ * 查找面板的「当前项」是否落在 [from, to) 里。
+ *
+ * 查找高亮是标记装饰，只对页面上真实存在的文字有用；公式、图、HTML 块、链接里
+ * 藏起来的地址，它们在缓冲区里的那段文字被 widget 换掉了或藏起来了，高亮落不上去
+ * （用户报的「查找时表格里的文字不高亮，只跳到位置」）。当前项落在这样的区间里时，
+ * 让它临时退回源码，高亮就落在看得见的文字上；翻到别处再渲染回去。
+ *
+ * 只看当前项、不看全部匹配：搜一个常见词时满页的图不该一起翻成源码。表格不走这条
+ * 路——表格在单元格里自己画全部匹配的高亮（见 TableWidget）。
+ */
+function searchCurrentIn(state: EditorState, from: number, to: number): boolean {
+  const search = state.field(searchStateField, false)
+  if (!search) return false
+  const current = search.matches[search.current]
+  return current !== undefined && current.from < to && current.to > from
+}
+
+/** 落在 [from, to) 里的匹配项，带上「是不是当前项」。表格 widget 画单元格高亮用。 */
+export interface SearchSpan {
+  from: number
+  to: number
+  current: boolean
+}
+
+function searchSpansIn(state: EditorState, from: number, to: number): SearchSpan[] {
+  const search = state.field(searchStateField, false)
+  if (!search) return []
+  const spans: SearchSpan[] = []
+  for (let index = 0; index < search.matches.length; index++) {
+    const match = search.matches[index]
+    if (match.from < to && match.to > from) spans.push({ from: match.from, to: match.to, current: index === search.current })
+  }
+  return spans
 }
 
 /**
@@ -582,17 +721,21 @@ function collectMath(
   inlineMath: boolean,
   /** 宽松强调要避开这些区间（公式已被替换装饰盖住，里面不能再叠标记）。 */
   occupy?: { from: number; to: number }[],
+  /** 整段被换成 widget 的区间，高亮 `==` 不许跨过去配对（公式里 `==` 是等号）。 */
+  opaque?: { from: number; to: number }[],
 ): void {
   for (const range of scanMath(text, excluded)) {
     if (!range.block && !inlineMath) continue
     occupy?.push({ from: range.from, to: range.to })
+    opaque?.push({ from: range.from, to: range.to })
     // ColaMD CT（2026-11-22 修重大 bug）：行内公式也注册成 zone 并在光标落进
     // 区间时退回源码。此前行内公式「永不显形」+ 点击永远只落到区间起点，
     // 表现为「只有第一次点击有效，之后点哪儿光标都不动」。显形后源码就是
     // 普通文字，原生点击/方向键随便定位；光标离开区间重新渲染。zone 让
     // activeZonesKey 在光标进出公式时变化，#201 的重算门才会放行。
     zones.push({ from: range.from, to: range.to, kind: 'block' })
-    if (isBlockActive(state, range.from, range.to)) {
+    // 光标落进区间，或查找的当前项落进区间：退回源码（后者见 searchCurrentIn）
+    if (isBlockActive(state, range.from, range.to) || searchCurrentIn(state, range.from, range.to)) {
       const delim = range.block ? 2 : 1
       ranges.push({ from: range.from, to: range.from + delim, deco: MARK({ class: 'cm-md-marker' }) })
       ranges.push({ from: range.to - delim, to: range.to, deco: MARK({ class: 'cm-md-marker' }) })
@@ -615,7 +758,17 @@ function collectMath(
 // ColaMD CT：允许跨软换行（`前==高亮\n续行==后`），但不跨空行
 const HIGHLIGHT_RE = /(?<![=])==(?!=)((?:(?!\n\s*\n)[^=])+?)==(?!=)/g
 
-function collectHighlight(state: EditorState, text: string, ranges: DecorationRange[], excluded: Excluded[], enabled: boolean, occupy?: { from: number; to: number }[]): void {
+function collectHighlight(
+  state: EditorState,
+  text: string,
+  ranges: DecorationRange[],
+  excluded: Excluded[],
+  enabled: boolean,
+  occupy?: { from: number; to: number }[],
+  extras?: RevealExtra[],
+  /** 被整个换成 widget 的行内构造（图片、公式），见 buildDecorations 的 opaque。 */
+  opaque: { from: number; to: number }[] = [],
+): void {
   if (!enabled) return
   const inExcluded = (pos: number) => excluded.some((e) => pos >= e.from && pos < e.to)
 
@@ -624,12 +777,26 @@ function collectHighlight(state: EditorState, text: string, ranges: DecorationRa
   while ((match = HIGHLIGHT_RE.exec(text)) !== null) {
     const start = match.index
     const end = start + match[0].length
-    if (inExcluded(start)) continue
-    const active = isActiveLine(state, start)
+    // 跳过一处配对后从开侧定界符后面接着扫：它可能一路吃到了后文真正的 `==高亮==` 的开侧，
+    // 照默认的 lastIndex 往下走，后文那一对就永远配不上
+    if (inExcluded(start)) {
+      HIGHLIGHT_RE.lastIndex = start + 2
+      continue
+    }
+    // 配对不许跨过图片或公式：里面的 `==` 不是定界符——base64 图片地址的结尾就是 `==`，
+    // 公式里 `==` 是等号。以前从图片地址里那一个 `==` 一直吃到后文真正的 `==高亮==`，
+    // 中间几行全被当成高亮，后文那对定界符反而少了一半（2026-11-23 回归里撞出来的）。
+    if (opaque.some((span) => start < span.to && end > span.from)) {
+      HIGHLIGHT_RE.lastIndex = start + 2
+      continue
+    }
+    // 光标在这段高亮里（或紧贴两端）时定界符 `==` 显形
+    const active = within(state, start, end)
     // 藏定界符，给中间那段加底色；光标在这一行时定界符露出来，但仍要能认出来
     const delimiter = (from: number, to: number) =>
       active ? MARK({ class: 'cm-md-marker' }) : hide(from, to)
     occupy?.push({ from: start, to: end })
+    extras?.push({ from: start, to: end })
     ranges.push({ from: start, to: start + 2, deco: delimiter(start, start + 2) })
     ranges.push({ from: end - 2, to: end, deco: delimiter(end - 2, end) })
     ranges.push({ from: start + 2, to: end - 2, deco: MARK({ class: 'cm-md-highlight' }) })
@@ -752,6 +919,14 @@ const POINTER_EVENTS = new Set([
   'touchend',
 ])
 
+/**
+ * Mermaid 块此刻是否显示源码：光标在里面，或查找的当前项在里面（见 searchCurrentIn）。
+ * 画图的地方和围栏标记的收集器（collectInline）都要问这同一个问题，答案必须一致。
+ */
+function mermaidSourceShown(state: EditorState, from: number, to: number): boolean {
+  return isBlockActive(state, from, to) || searchCurrentIn(state, from, to)
+}
+
 function collectMermaid(
   state: EditorState,
   text: string,
@@ -772,7 +947,8 @@ function collectMermaid(
       const code = text.slice(bodyStart, lastLineStart === -1 ? node.to : lastLineStart)
       if (!code.trim()) return
       zones.push({ from: node.from, to: node.to, kind: 'block' })
-      if (isBlockActive(state, node.from, node.to)) return
+      // 查找命中图里的文字（节点标签）时也退回源码：画出来的图里高亮落不上去
+      if (mermaidSourceShown(state, node.from, node.to)) return
       ranges.push({
         from: node.from,
         to: node.to,
@@ -804,7 +980,8 @@ function collectFrontmatter(
   const editing = state.selection.ranges.some(
     (range) => range.empty && range.head >= front.from && range.head <= front.to
   )
-  if (editing) {
+  // 查找的当前项落在属性区里时也露出来（收起时这段文字在页面上不存在）
+  if (editing || searchCurrentIn(state, front.from, front.to)) {
     pushBlockLines(state, front.from, front.to, 'cm-md-frontmatter', ranges)
     return
   }
@@ -826,8 +1003,15 @@ function collectFrontmatter(
  * 光标进去才回到源码，这里照做。
  *
  * 光标落在表格的任意一行里时退回源码，所以改表格仍然是改文字。
+ *
+ * ColaMD CT（2026-11-23）：查找高亮。表格是整块替换的，查找面板的标记装饰落不到
+ * 格子里的文字上（用户报的「Ctrl+F 时表格里的文字不高亮，只跳到位置」）。所以把落在
+ * 表格里的匹配交给 widget，在单元格里自己画：其余匹配一个色，当前项一个色，与正文一致。
  */
 class TableWidget extends WidgetType {
+  /** 匹配集合的指纹：换一个「当前项」也算变（当前项要换色，DOM 得重建）。 */
+  private readonly marksKey: string
+
   constructor(
     readonly source: string,
     readonly base: string | null,
@@ -835,17 +1019,21 @@ class TableWidget extends WidgetType {
     readonly to: number,
     readonly inlineMath = true,
     readonly looseEmphasis = true,
+    /** 落在这张表里的查找匹配（缓冲区绝对位置），见 searchSpansIn。 */
+    readonly marks: readonly SearchSpan[] = [],
   ) {
     super()
+    this.marksKey = marks.map((mark) => `${mark.from}:${mark.to}${mark.current ? '*' : ''}`).join(',')
   }
 
   eq(other: TableWidget): boolean {
     return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to
       && other.inlineMath === this.inlineMath && other.looseEmphasis === this.looseEmphasis
+      && other.marksKey === this.marksKey
   }
 
   toDOM(): HTMLElement {
-    const rows = parseTable(this.source)
+    const rows = parseTableCells(this.source)
     const table = document.createElement('table')
     table.className = 'cm-md-table-widget'
     withSourceRange(table, this.from, this.to)
@@ -858,8 +1046,8 @@ class TableWidget extends WidgetType {
     const headRow = document.createElement('tr')
     head.forEach((cell, index) => {
       const th = document.createElement('th')
-      th.style.textAlign = alignOf(rows[1]?.[index] ?? '')
-      appendInline(th, cell, this.base, this.inlineMath)
+      th.style.textAlign = alignOf(rows[1]?.[index]?.text ?? '')
+      appendInline(th, cell.text, this.base, this.inlineMath, cellMarks(cell, this.from, this.marks))
       headRow.appendChild(th)
     })
     thead.appendChild(headRow)
@@ -869,8 +1057,9 @@ class TableWidget extends WidgetType {
       const tr = document.createElement('tr')
       for (let i = 0; i < head.length; i++) {
         const td = document.createElement('td')
-        td.style.textAlign = alignOf(rows[1]?.[i] ?? '')
-        appendInline(td, row[i] ?? '', this.base, this.inlineMath)
+        td.style.textAlign = alignOf(rows[1]?.[i]?.text ?? '')
+        const cell = row[i]
+        if (cell) appendInline(td, cell.text, this.base, this.inlineMath, cellMarks(cell, this.from, this.marks))
         tr.appendChild(td)
       }
       tbody.appendChild(tr)
@@ -884,32 +1073,73 @@ class TableWidget extends WidgetType {
   }
 }
 
+/** 表格源码里的一个单元格：显示用的文字，以及每个字在表格源码里的下标。 */
+interface TableCell {
+  text: string
+  /** `text[j]` 在表格源码里的下标（`\|` 的两个字符算一个，记 `|` 那个的位置）。 */
+  map: number[]
+}
+
 /** 按行拆表格源码，行内按未转义的 `|` 拆单元格。 */
-function parseTable(source: string): string[][] {
-  return source
-    .split('\n')
-    .filter((line) => line.trim() !== '')
-    .map((line) => {
-      const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
-      const cells: string[] = []
-      let current = ''
-      for (let i = 0; i < trimmed.length; i++) {
-        const char = trimmed[i]
-        if (char === '\\' && trimmed[i + 1] === '|') {
-          current += '|'
-          i++
-          continue
-        }
-        if (char === '|') {
-          cells.push(current.trim())
-          current = ''
-          continue
-        }
-        current += char
+function parseTableCells(source: string): TableCell[][] {
+  const rows: TableCell[][] = []
+  let lineStart = 0
+  for (const line of source.split('\n')) {
+    const lineOffset = lineStart
+    lineStart += line.length + 1
+    if (line.trim() === '') continue
+    // 行首的空白、行首那根管子被去掉了，记下总共去了几个字符，格子里的下标才对得上源码
+    // （行尾那根管子去掉不影响前面的下标，不算）
+    const trimmedLine = line.trim()
+    const trimmed = trimmedLine.replace(/^\|/, '').replace(/\|$/, '')
+    const offset = lineOffset + (line.length - trimmedLine.length) + (trimmedLine.startsWith('|') ? 1 : 0)
+    const cells: TableCell[] = []
+    let current = ''
+    let map: number[] = []
+    // 首尾空白不属于格子文字：文字裁掉，下标表跟着裁
+    const flush = (): void => {
+      const text = current.trim()
+      const lead = current.length - current.trimStart().length
+      cells.push({ text, map: map.slice(lead, lead + text.length) })
+      current = ''
+      map = []
+    }
+    for (let i = 0; i < trimmed.length; i++) {
+      const char = trimmed[i]
+      if (char === '\\' && trimmed[i + 1] === '|') {
+        current += '|'
+        map.push(offset + i + 1)
+        i++
+        continue
       }
-      cells.push(current.trim())
-      return cells
-    })
+      if (char === '|') {
+        flush()
+        continue
+      }
+      current += char
+      map.push(offset + i)
+    }
+    flush()
+    rows.push(cells)
+  }
+  return rows
+}
+
+/**
+ * 落在某个单元格文字里的查找匹配，换算成格子文字的局部下标。
+ * 越出格子文字的（管子、破折号、首尾空白）裁掉；一格文字都没盖住的不要。
+ */
+function cellMarks(cell: TableCell, tableFrom: number, marks: readonly SearchSpan[]): SearchSpan[] {
+  const { map } = cell
+  const local: SearchSpan[] = []
+  for (const mark of marks) {
+    let from = 0
+    while (from < map.length && tableFrom + map[from] < mark.from) from++
+    let to = from
+    while (to < map.length && tableFrom + map[to] < mark.to) to++
+    if (to > from) local.push({ from, to, current: mark.current })
+  }
+  return local
 }
 
 /** 分隔行里的对齐标记：`:---` 左、`:---:` 居中、`---:` 右。 */
@@ -968,27 +1198,88 @@ function codeSpanRanges(text: string): Excluded[] {
 }
 
 /**
- * 往单元格里写一段源码文字，其中的公式画成 KaTeX。
+ * 往单元格里写一段源码文字，其中的公式画成 KaTeX，查找匹配包成高亮 span。
  *
  * `from` / `to` 是这段文字在整格源码里的下标：强调、链接里的文字也可能带公式，
  * 所以按整格的下标取区间，而不是按切片的局部下标。
  */
-function appendCellText(parent: HTMLElement, text: string, math: MathRange[], from: number, to: number): void {
+function appendCellText(
+  parent: HTMLElement,
+  text: string,
+  math: MathRange[],
+  from: number,
+  to: number,
+  marks: readonly SearchSpan[],
+): void {
   let cursor = from
   for (const range of math) {
     // 只处理整段落在这一段里的公式；跨过边界的（`**$x**$` 这类）留着当普通文字
     if (range.from < cursor || range.to > to) continue
-    if (range.from > cursor) parent.appendChild(document.createTextNode(text.slice(cursor, range.from)))
-    parent.appendChild(mathElement(range.code, false))
+    if (range.from > cursor) appendText(parent, text, cursor, range.from, marks)
+    const el = mathElement(range.code, false)
+    // 画出来的公式里分不出源码的哪一段，只有整条公式都被匹配盖住才加高亮
+    const className = markClassCovering(marks, range.from, range.to)
+    if (className) el.classList.add(className)
+    parent.appendChild(el)
     cursor = range.to
+  }
+  if (cursor < to) appendText(parent, text, cursor, to, marks)
+}
+
+/** 一处查找高亮。与正文里检索面板画的装饰同类名、同配色（base.css）。 */
+function searchMark(text: string, current: boolean): HTMLSpanElement {
+  const span = document.createElement('span')
+  span.className = current ? 'search-match-current' : 'search-match'
+  span.textContent = text
+  return span
+}
+
+/** 把 `text[from, to)` 写进 parent，落在这段里的查找匹配各包成一个高亮 span（越界的裁掉）。 */
+function appendText(parent: HTMLElement, text: string, from: number, to: number, marks: readonly SearchSpan[]): void {
+  let cursor = from
+  for (const mark of marks) {
+    if (mark.to <= cursor || mark.from >= to) continue
+    const start = Math.max(mark.from, cursor)
+    const end = Math.min(mark.to, to)
+    if (start > cursor) parent.appendChild(document.createTextNode(text.slice(cursor, start)))
+    parent.appendChild(searchMark(text.slice(start, end), mark.current))
+    cursor = end
   }
   if (cursor < to) parent.appendChild(document.createTextNode(text.slice(cursor, to)))
 }
 
-function appendInline(parent: HTMLElement, text: string, base: string | null, inlineMath = true): void {
+/**
+ * `[from, to)` 这段源码被画成了一个不可拆的元素（公式、图片、实体解码后的字符）时
+ * 该挂的高亮类名，不需要就是空串。只有某处匹配**盖住整段**才加：只盖住一半的话，
+ * 画出来的东西里分不出哪一半，硬加就是假高亮。
+ */
+function markClassCovering(marks: readonly SearchSpan[], from: number, to: number): string {
+  let className = ''
+  for (const mark of marks) {
+    if (mark.from <= from && mark.to >= to) {
+      if (mark.current) className = 'search-match-current'
+      else className ||= 'search-match'
+    }
+  }
+  return className
+}
+
+/** 写一段与源码不是逐字对应的文字（实体解码后的字符）；要高亮时包一层。 */
+function appendLiteral(parent: HTMLElement, value: string, className: string): void {
+  if (className) parent.appendChild(searchMark(value, className === 'search-match-current'))
+  else parent.appendChild(document.createTextNode(value))
+}
+
+function appendInline(
+  parent: HTMLElement,
+  text: string,
+  base: string | null,
+  inlineMath = true,
+  marks: readonly SearchSpan[] = [],
+): void {
   // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉；方言关掉行内公式时按普通文字走
   const math = inlineMath ? scanMath(text, codeSpanRanges(text)) : []
-  appendInlineRange(parent, text, base, math)
+  appendInlineRange(parent, text, base, math, marks)
 }
 
 /** 单元格里嵌套的行内 HTML 闭标签位置（同名标签按计数配对）。返回 null = 没配上。 */
@@ -1010,15 +1301,25 @@ function cellCloseTag(text: string, from: number, name: string): { from: number;
   return null
 }
 
-function appendInlineRange(parent: HTMLElement, text: string, base: string | null, math: MathRange[]): void {
+function appendInlineRange(
+  parent: HTMLElement,
+  text: string,
+  base: string | null,
+  math: MathRange[],
+  marks: readonly SearchSpan[],
+): void {
   const write = (target: HTMLElement, from: number, to: number): void =>
-    appendCellText(target, text, math, from, to)
-  // 容器的内层：切成子文本递归，公式范围换算到子文本坐标
+    appendCellText(target, text, math, from, to, marks)
+  // 容器的内层：切成子文本递归，公式范围与查找高亮换算到子文本坐标
   const recurse = (target: HTMLElement, from: number, to: number): void => {
     const subMath = math
       .filter((range) => range.from >= from && range.to <= to)
       .map((range) => ({ ...range, from: range.from - from, to: range.to - from }))
-    appendInlineRange(target, text.slice(from, to), base, subMath)
+    // 高亮裁到内层：匹配伸进定界符的那一截不显示，其余照常亮
+    const subMarks = marks
+      .filter((mark) => mark.from < to && mark.to > from)
+      .map((mark) => ({ ...mark, from: Math.max(mark.from, from) - from, to: Math.min(mark.to, to) - from }))
+    appendInlineRange(target, text.slice(from, to), base, subMath, subMarks)
   }
 
   INLINE_RE.lastIndex = 0
@@ -1063,7 +1364,13 @@ function appendInlineRange(parent: HTMLElement, text: string, base: string | nul
       parent.appendChild(el)
     } else if (g.code !== undefined) {
       const el = document.createElement('code')
-      el.textContent = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? g.code.slice(1, -1) : g.code
+      if (at.code) {
+        // CommonMark：内容两端同时是空格（且不全是空格）时各剥掉一格
+        const strip = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? 1 : 0
+        appendText(el, text, at.code[0] + strip, at.code[1] - strip, marks)
+      } else {
+        el.textContent = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? g.code.slice(1, -1) : g.code
+      }
       parent.appendChild(el)
     } else if (g.strike !== undefined) {
       const el = document.createElement('s')
@@ -1080,12 +1387,17 @@ function appendInlineRange(parent: HTMLElement, text: string, base: string | nul
       const img = document.createElement('img')
       img.src = resolveImageSrc(g.src ?? '', base)
       img.alt = g.alt
+      // 图片是一整块：匹配盖住整段图片源码（或整段 alt）才给图加高亮
+      const className = markClassCovering(marks, index, matchEnd)
+        || (at.alt ? markClassCovering(marks, at.alt[0], at.alt[1]) : '')
+      if (className) img.classList.add(className)
       parent.appendChild(img)
     } else if (g.linkText !== undefined) {
       const el = document.createElement('a')
       const [from, to] = at.linkText ?? [0, 0]
       // 空文字的空链接仍然把地址顶上来，否则格子里什么都看不见
       if (to > from) recurse(el, from, to)
+      else if (at.href) appendText(el, text, at.href[0], at.href[1], marks)
       else el.textContent = g.href ?? ''
       const href = (g.href ?? '').trim()
       if (/^https?:\/\//i.test(href)) el.setAttribute('href', href)
@@ -1093,14 +1405,14 @@ function appendInlineRange(parent: HTMLElement, text: string, base: string | nul
     } else if (g.autolink !== undefined) {
       const address = g.autolink
       const el = document.createElement('a')
-      el.textContent = address
+      appendText(el, text, at.autolink?.[0] ?? 0, at.autolink?.[1] ?? text.length, marks)
       el.setAttribute('href', /^[a-z][a-z0-9+.-]*:/i.test(address) ? address : `mailto:${address}`)
       parent.appendChild(el)
     } else if (g.escape !== undefined) {
-      parent.appendChild(document.createTextNode(g.escape))
+      // 只显示被转义的那个字符（反斜杠不显示）
+      appendText(parent, text, index + 1, index + 2, marks)
     } else if (g.entity !== undefined) {
-      const decoded = decodeEntity(match[0])
-      parent.appendChild(document.createTextNode(decoded ?? match[0]))
+      appendLiteral(parent, decodeEntity(match[0]) ?? match[0], markClassCovering(marks, index, matchEnd))
     } else if (g.htmlTag !== undefined) {
       const tag = parseHtmlTag(g.htmlTag)
       const close = tag && !tag.closing && !tag.selfClosing && !HTML_VOID.has(tag.name)
@@ -1113,8 +1425,11 @@ function appendInlineRange(parent: HTMLElement, text: string, base: string | nul
         const semantic = HTML_SEMANTIC[tag.name]
         const el = document.createElement('span')
         if (!semantic && otherAttrs) {
-          // 带其它属性的标签：整段交给消毒器画成真 HTML
+          // 带其它属性的标签：整段交给消毒器画成真 HTML。
+          // 消毒后的 DOM 与源码对不上号，只有匹配盖住整段才给外壳加高亮
           el.className = 'cm-md-html-inline'
+          const className = markClassCovering(marks, index, close.to)
+          if (className) el.classList.add(className)
           el.appendChild(sanitizeHTML(text.slice(index, close.to)))
         } else {
           if (semantic) el.classList.add(`cm-md-html-${semantic}`)
@@ -1127,6 +1442,8 @@ function appendInlineRange(parent: HTMLElement, text: string, base: string | nul
         // 单标签（<br>、<img>）或没配上对的标签：消毒后画出来
         const el = document.createElement('span')
         el.className = 'cm-md-html-inline'
+        const className = markClassCovering(marks, index, matchEnd)
+        if (className) el.classList.add(className)
         el.appendChild(sanitizeHTML(g.htmlTag))
         parent.appendChild(el)
       }
@@ -1163,7 +1480,8 @@ function collectTables(
             node.from,
             node.to,
             dialectOf(state).inlineMath,
-            dialectOf(state).looseEmphasis
+            dialectOf(state).looseEmphasis,
+            searchSpansIn(state, node.from, node.to)
           )
         }),
       })
@@ -1218,11 +1536,13 @@ function collectLinks(state: EditorState, ranges: DecorationRange[], front: Rang
     // 自动链接 `<https://…>`、`<a@b.com>`：尖括号只是指令，地址本身就是链接文字
     if (node.name === 'Autolink') {
       const url = node.node.getChild('URL')
-      if (!url || isActiveRange(state, node.from, node.to)) return false
+      if (!url) return false
       const href = state.doc.sliceString(url.from, url.to)
       const isMail = !/^[a-z][a-z0-9+.-]*:/i.test(href)
+      // 光标在这条自动链接上（或紧贴两端）时尖括号压淡显形
+      const shown = constructRevealed(state, node.node)
       for (const mark of node.node.getChildren('LinkMark')) {
-        ranges.push({ from: mark.from, to: mark.to, deco: hide(mark.from, mark.to) })
+        ranges.push({ from: mark.from, to: mark.to, deco: shown ? MARK({ class: 'cm-md-marker' }) : hide(mark.from, mark.to) })
       }
       occupy.push({ from: node.from, to: node.to })
       ranges.push({
@@ -1233,7 +1553,8 @@ function collectLinks(state: EditorState, ranges: DecorationRange[], front: Rang
       return false
     }
     if (node.name !== 'Link') return
-    if (isActiveRange(state, node.from, node.to)) return false
+    // 光标在链接文字里：整条 `[文字](地址)` 按源码显示，就地改
+    if (constructRevealed(state, node.node)) return false
     const url = node.node.getChild('URL')
     const label = node.node.getChild('LinkLabel')
     let href: string
@@ -1264,6 +1585,9 @@ function collectLinks(state: EditorState, ranges: DecorationRange[], front: Rang
       if (defined === undefined) return false
       href = defined
     }
+    // 查找的当前项落在藏起来的那部分里（开头的 `[`，或 `](地址)` 那一截）：整条退回源码，
+    // 高亮才落得到看得见的文字上（地址在渲染模式下是不显示的）
+    if (searchCurrentIn(state, node.from, node.from + 1) || searchCurrentIn(state, textTo, node.to)) return false
     occupy.push({ from: node.from, to: node.to })
     ranges.push({ from: node.from, to: node.from + 1, deco: hide(node.from, node.from + 1) })
     ranges.push({ from: textTo, to: node.to, deco: hide(textTo, node.to) })
@@ -1301,7 +1625,13 @@ class FootnoteRefWidget extends WidgetType {
   }
 }
 
-function collectFootnotes(state: EditorState, text: string, ranges: DecorationRange[], front: Range | null): void {
+function collectFootnotes(
+  state: EditorState,
+  text: string,
+  ranges: DecorationRange[],
+  front: Range | null,
+  extras: RevealExtra[] = [],
+): void {
   const numbers = footnoteNumbers(text)
   const definitions = footnoteDefinitions(text)
 
@@ -1313,7 +1643,10 @@ function collectFootnotes(state: EditorState, text: string, ranges: DecorationRa
     const to = from + match[0].length
     if (front && inRange(front, from)) continue
     if (definitions.has(match[1]) === false && numbers.has(match[1]) === false) continue
-    if (isActiveLine(state, from)) continue
+    // 光标在这条脚注引用上（或紧贴两端）时不换成上标数字，源码 `[^note]` 就地可改；
+    // 查找的当前项落在它里面时同样退回源码（上标数字里没有这段文字，高亮落不上去）
+    extras.push({ from, to })
+    if (within(state, from, to) || searchCurrentIn(state, from, to)) continue
     ranges.push({
       from,
       to,
@@ -1364,6 +1697,7 @@ function collectHTML(
   front: Range | null,
   zones: ActiveZone[],
   occupy: { from: number; to: number }[] = [],
+  extras: RevealExtra[] = [],
 ): void {
   // 成对的行内标签一起处理：闭标签的起点记下来，轮到它时就跳过
   const paired = new Set<number>()
@@ -1372,8 +1706,12 @@ function collectHTML(
     // 交给消毒器：注释被丢掉，后面的文字照常显示。段落中间的注释由 collectInline 藏掉。
     const block = node.name === 'HTMLBlock' || node.name === 'CommentBlock'
     if (!block && node.name !== 'HTMLTag') return
-    if (block) zones.push({ from: node.from, to: node.to, kind: 'block' })
-    if (block ? isBlockActive(state, node.from, node.to) : isActiveLine(state, node.from)) return false
+    if (block) {
+      zones.push({ from: node.from, to: node.to, kind: 'block' })
+      // 块级 HTML：光标在块里就退回源码；查找的当前项落在块里时也退回源码——
+      // 画出来的 HTML 里没有缓冲区那段文字，高亮只能落在看得见的源码上
+      if (isBlockActive(state, node.from, node.to) || searchCurrentIn(state, node.from, node.to)) return false
+    }
     if (!block) {
       if (paired.has(node.from)) return false
       const tag = parseHtmlTag(state.doc.sliceString(node.from, node.to))
@@ -1386,23 +1724,34 @@ function collectHTML(
         const style = styleAttr ? cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '') : ''
         const otherAttrs = tag.attrs.replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*')/i, '').trim()
         const semantic = HTML_SEMANTIC[tag.name]
+        // 光标在这对标签里（或紧贴两头）时两头的标签压淡显形，与强调的边界规则一致。
+        // 区间与 extras 里记的必须是同一个，重算门才问得出同一个答案。
+        const shown = within(state, node.from, close.to)
+        extras.push({ from: node.from, to: close.to })
+        const tagDeco = shown ? MARK({ class: 'cm-md-marker' }) : null
         if (!semantic && otherAttrs) {
           // 带其它属性（class / href / color…）的标签没法用「藏标签 + 加样式」表达：
           // 整段画成真 HTML（消毒后）。里面的 markdown 不再解析——这是 HTML，本该如此。
           occupy.push({ from: node.from, to: close.to })
-          ranges.push({
-            from: node.from,
-            to: close.to,
-            deco: Decoration.replace({ widget: new HTMLWidget(state.doc.sliceString(node.from, close.to), false, node.from, close.to) }),
-          })
+          if (tagDeco) {
+            // 披露时只显示源码文字（两头的标签压淡），不画 widget
+            ranges.push({ from: node.from, to: node.to, deco: tagDeco })
+            ranges.push({ from: close.from, to: close.to, deco: tagDeco })
+          } else {
+            ranges.push({
+              from: node.from,
+              to: close.to,
+              deco: Decoration.replace({ widget: new HTMLWidget(state.doc.sliceString(node.from, close.to), false, node.from, close.to) }),
+            })
+          }
           return false
         }
         // 语义标签（<u>、<b>、<sub>…）：藏掉两头的标签，给中间那段文字加对应的样式。
         // 中间仍是普通的 markdown 文字，里面的加粗、链接、公式照常渲染。
         occupy.push({ from: node.from, to: node.to })
         occupy.push({ from: close.from, to: close.to })
-        ranges.push({ from: node.from, to: node.to, deco: hide(node.from, node.to) })
-        ranges.push({ from: close.from, to: close.to, deco: hide(close.from, close.to) })
+        ranges.push({ from: node.from, to: node.to, deco: tagDeco ?? hide(node.from, node.to) })
+        ranges.push({ from: close.from, to: close.to, deco: tagDeco ?? hide(close.from, close.to) })
         if (close.from > node.to && (semantic || style)) {
           ranges.push({
             from: node.to,
@@ -1522,12 +1871,23 @@ function codeInsideFence(state: EditorState, node: SyntaxNodeRef): string {
 
 // ─── 图片 ────────────────────────────────────────────────────────────────────
 
-function collectImages(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+function collectImages(
+  state: EditorState,
+  ranges: DecorationRange[],
+  front: Range | null,
+  /** 图片区间要避开的地方：宽松强调不许往里补画（图片退回源码时地址要原样可见）。 */
+  occupy?: { from: number; to: number }[],
+  /** 整段被换成 widget 的区间，高亮 `==` 不许跨过去配对。 */
+  opaque?: { from: number; to: number }[],
+): void {
   const base = state.field(documentFileUrlField, false) ?? documentFileUrl
   iterateContent(state, front, (node) => {
     if (node.name !== 'Image') return
-    // 光标在图片这一行就退回源码：改路径就是改文字
-    if (isActiveRange(state, node.from, node.to)) return false
+    occupy?.push({ from: node.from, to: node.to })
+    opaque?.push({ from: node.from, to: node.to })
+    // 光标在图片源码的开头就退回源码：改路径就是改文字（见 constructRevealed）；
+    // 查找的当前项落在图片源码里时也退回源码——画出来的图里没有这段文字可高亮
+    if (constructRevealed(state, node.node) || searchCurrentIn(state, node.from, node.to)) return false
     const source = state.doc.sliceString(node.from, node.to)
     const parsed = parseImage(source)
     if (!parsed) return false
@@ -1554,9 +1914,8 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
         // （属性区里的 `---` 是 YAML 的分隔符，已被 iterateContent 挡在外面）
         const lineFrom = state.doc.lineAt(node.from).from
         ranges.push({ from: lineFrom, to: lineFrom, deco: BLOCK('cm-md-hr') })
-        if (!isActiveLine(state, node.from)) {
-          ranges.push({ from: node.from, to: node.to, deco: hide(node.from, node.to) })
-        }
+        // 分隔线不随光标披露：行上本来就只剩一条横线，再把 `---` 翻出来只会多出一行字
+        ranges.push({ from: node.from, to: node.to, deco: hide(node.from, node.to) })
         break
       }
       case 'ListMark': {
@@ -1569,16 +1928,22 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
         const line = state.doc.lineAt(node.from)
         const quoteLen = QUOTE_PREFIX_RE.exec(state.doc.sliceString(line.from, node.from))?.[0].length ?? 0
         const hideFrom = line.from + quoteLen
-        if (node.from > hideFrom) ranges.push({ from: hideFrom, to: node.from, deco: hide(hideFrom, node.from) })
+        // 光标在标记上（或紧贴标记之后）时标记显形，可以就地改；光标在条目正文里时
+        // 照常画成圆点 / 序号（见 constructRevealed）。光标停在子项的缩进里时缩进也一并
+        // 显形——否则光标落在被藏掉的空格里，看不见自己在哪。
+        const markShown = constructRevealed(state, node.node)
+        if (node.from > hideFrom) {
+          ranges.push({ from: hideFrom, to: node.from, deco: markShown ? MARK({ class: 'cm-md-marker' }) : hide(hideFrom, node.from) })
+        }
         const raw = state.doc.sliceString(node.from, node.to).trim()
         // 待办项的圆点要去掉：它已经有复选框了，两个标记并排就是「• ☐ 文案」。
         const after = state.doc.sliceString(node.to, node.to + 4)
         if (/^\s+\[[ xX]\]/.test(after)) {
-          hideMarker(state, node.from, node.to, ranges, isActiveLine(state, node.from))
+          hideMarker(state, node.from, node.to, ranges, markShown)
           break
         }
         // `-` / `*` / `+` 画成真的圆点；`1.` 这种照原样显示，序号就是文件里的字
-        if (/^[-*+]$/.test(raw) && !isActiveLine(state, node.from)) {
+        if (/^[-*+]$/.test(raw) && !markShown) {
           ranges.push({
             from: node.from,
             to: node.to,
@@ -1625,7 +1990,7 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
         // 例外：这一行除了 `>` 别的什么都没有。刚打出一个 `>` 就把它藏掉，屏幕上什么
         // 都不剩，得再打个空格才出现引用竖线（2026-11-07 与标题同一个毛病）。
         const rest = state.doc.sliceString(node.to, state.doc.lineAt(node.to).to)
-        if (rest.trim() === '' || isActiveLine(state, node.from)) {
+        if (rest.trim() === '' || constructRevealed(state, node.node)) {
           ranges.push({ from: node.from, to: node.to, deco: MARK({ class: 'cm-md-quotemark' }) })
         } else {
           hideMarker(state, node.from, node.to, ranges)
@@ -1676,6 +2041,23 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
  */
 const URL_STOP = /[\u2E80-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3000-\u303F\uFF00-\uFFEF]/
 
+/**
+ * 强调类节点的样式区间。
+ *
+ * 定界符显形时（光标在这个构造里）只盖住中间的文字：显形的 `**` 是给人改的标记，
+ * 压淡就好，不该跟着加粗、倾斜、划一条删除线（删除线尤其没法用样式撤掉——
+ * text-decoration 会穿过行内子元素）。定界符藏着时照旧盖整个节点，外面的看不出来。
+ * 两头不是标记节点（解析不出意料之外的形状）就退回整个区间。
+ */
+function styledRange(node: SyntaxNodeRef, revealed: boolean): { from: number; to: number } {
+  const open = node.node.firstChild
+  const close = node.node.lastChild
+  if (revealed && open && close && open !== close && open.name === close.name && open.name.endsWith('Mark')) {
+    return { from: open.to, to: close.from }
+  }
+  return { from: node.from, to: node.to }
+}
+
 function collectInline(
   state: EditorState,
   ranges: DecorationRange[],
@@ -1695,7 +2077,6 @@ function collectInline(
       if (node.name === 'LinkReference') return false
       const from = node.from
       const to = node.to
-      const active = isActiveLine(state, from)
 
       switch (node.name) {
         case 'ATXHeading1':
@@ -1721,10 +2102,13 @@ function collectInline(
           const fence = node.node.parent
           // 整块 Mermaid 替换与围栏空替换同起点时，增量更新会只留下空块。
           if (node.name === 'CodeMark' && fence?.name === 'FencedCode' &&
-              !isBlockActive(state, fence.from, fence.to) &&
+              !mermaidSourceShown(state, fence.from, fence.to) &&
               /^(`{3,}|~{3,})\s*mermaid\s*$/.test(state.doc.sliceString(fence.from, state.doc.lineAt(fence.from).to).trim()) &&
               codeInsideFence(state, fence).trim()) break
-          ranges.push({ from, to, deco: active ? MARK({ class: 'cm-md-marker' }) : hide(from, to) })
+          // 光标在这个构造里（或紧贴两端）时标记压淡显形（见 constructRevealed）。
+          // 围栏代码块本身不在可披露之列——光标在代码块里时 ``` 不该跟着显形。
+          const shown = constructRevealed(state, node.node.parent!)
+          ranges.push({ from, to, deco: shown ? MARK({ class: 'cm-md-marker' }) : hide(from, to) })
           break
         }
         case 'CodeInfo': {
@@ -1735,8 +2119,17 @@ function collectInline(
         case 'HeaderMark': {
           // Setext 标题（`===` / `---` 下划线）的下划线行由下面的 Setext 分支整行处理
           if (node.node.parent?.name.startsWith('Setext')) break
-          // 标题的 `#` 连同后面那个空格一起藏，否则标题会比正文右移一个字
-          hideMarker(state, from, to, ranges, active)
+          // 标题的 `#` 连同后面那个空格一起藏，否则标题会比正文右移一个字；
+          // 光标在行首（标记上或紧贴其后）时显形，可以就地改标题级别
+          const shown = constructRevealed(state, node.node)
+          // 标题前的缩进（CommonMark 允许最多三格）与 `#` 同进退：藏着时一起藏——渲染好的
+          // 标题不该带着源码里的空格；显形时一起露，看到的就是源码原文。
+          // `#` 前面不全是空白的不碰（`> # 标题`、`- # 标题`），那一段归引用标记 / 列表标记。
+          const lineFrom = state.doc.lineAt(from).from
+          if (!shown && from > lineFrom && state.doc.sliceString(lineFrom, from).trim() === '') {
+            ranges.push({ from: lineFrom, to: from, deco: hide(lineFrom, from) })
+          }
+          hideMarker(state, from, to, ranges, shown)
           break
         }
         // ColaMD CT（2026-11-23 全语法审计）：下面这些节点此前渲染层完全没有处理，
@@ -1756,9 +2149,10 @@ function collectInline(
           break
         }
         case 'Escape': {
-          // `\*` `\_` `\#`：反斜杠只是「下一个字符取字面」的指令，藏掉它
+          // `\*` `\_` `\#`：反斜杠只是「下一个字符取字面」的指令，藏掉它；
+          // 光标紧挨着它时压淡显形
           occupy.push({ from, to: from + 1 })
-          ranges.push({ from, to: from + 1, deco: hide(from, from + 1) })
+          ranges.push({ from, to: from + 1, deco: constructRevealed(state, node.node) ? MARK({ class: 'cm-md-marker' }) : hide(from, from + 1) })
           break
         }
         case 'HardBreak': {
@@ -1784,7 +2178,9 @@ function collectInline(
         }
         case 'InlineCode': {
           occupy.push({ from, to })
-          ranges.push({ from, to, deco: MARK({ class: 'cm-md-inlinecode' }) })
+          // 反引号显形时同样只给中间的文字上代码样式：标记一律是压淡的普通字
+          const inner = styledRange(node.node, constructRevealed(state, node.node))
+          ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-inlinecode' }) })
           // CommonMark：内容两端同时是空格（且不全是空格）时各剥掉一格，
           // 否则 `` ` 带空格 ` `` 会比 `` `带空格` `` 多出两头空白
           const firstMark = node.node.firstChild
@@ -1801,17 +2197,20 @@ function collectInline(
         }
         case 'StrongEmphasis': {
           occupy.push({ from, to })
-          ranges.push({ from, to, deco: MARK({ class: 'cm-md-strong' }) })
+          const inner = styledRange(node.node, constructRevealed(state, node.node))
+          ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-strong' }) })
           break
         }
         case 'Emphasis': {
           occupy.push({ from, to })
-          ranges.push({ from, to, deco: MARK({ class: 'cm-md-em' }) })
+          const inner = styledRange(node.node, constructRevealed(state, node.node))
+          ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-em' }) })
           break
         }
         case 'Strikethrough': {
           occupy.push({ from, to })
-          ranges.push({ from, to, deco: MARK({ class: 'cm-md-strike' }) })
+          const inner = styledRange(node.node, constructRevealed(state, node.node))
+          ranges.push({ from: inner.from, to: inner.to, deco: MARK({ class: 'cm-md-strike' }) })
           break
         }
         case 'URL': {
@@ -1873,9 +2272,24 @@ function collectLooseEmphasis(
   paragraphs: { from: number; to: number }[],
   occupy: { from: number; to: number }[],
   ranges: DecorationRange[],
+  extras: RevealExtra[] = [],
 ): void {
-  const overlaps = (from: number, to: number) =>
-    occupy.some((span) => from < span.to && to > span.from)
+  // occupy 不是全局有序的（几个收集器各按自己的顺序往里塞）。按 from 排一次，再记一个
+  // 「前缀最大 to」：与 [from, to) 相交的区间存在，当且仅当所有 from < to 的区间里最大的
+  // to 大于 from。以前是对整个 occupy 线性扫，每个配对扫一遍，大文档里是平方级的。
+  const claimed = occupy.slice().sort((a, b) => a.from - b.from)
+  const claimedMaxTo: number[] = [0]
+  for (let k = 0; k < claimed.length; k++) claimedMaxTo.push(Math.max(claimedMaxTo[k], claimed[k].to))
+  const overlaps = (from: number, to: number): boolean => {
+    let lo = 0
+    let hi = claimed.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (claimed[mid].from < to) lo = mid + 1
+      else hi = mid
+    }
+    return claimedMaxTo[lo] > from
+  }
 
   for (const para of paragraphs) {
     if (para.to <= para.from) continue
@@ -1919,31 +2333,50 @@ function collectLooseEmphasis(
 
     for (const spec of LOOSE_SPECS) {
       const d = spec.delim.length
+      const head = spec.delim[0]
+      // 这一段里所有「能当闭侧」的位置，升序，所有开侧共用。
+      //
+      // 以前是从开侧起一个字符一个字符往后扫到找到为止。落单的开侧——`**x**` 的后一个 `*`
+      // 在单 `*` 规则眼里就是——会把整段扫到头，一段里每多一个落单的开侧就多扫一遍全文。
+      // 不空行的长文（一句一行的写法整篇就是一个段落）里全是这种结构：1500 行的段落
+      // 每次重算 170ms，而每敲一个字都要重算（2026-11-23 的大文档回归里量出来的）。
+      // 闭侧合不合法只看它自己的位置，与开侧无关，所以可以一次列出来。
+      const closers: number[] = []
+      for (let j = 0; j + d <= logical.length; j++) {
+        if (logical[j] !== head || !logical.startsWith(spec.delim, j)) continue
+        if (logical[j - 1] === head || escaped(j)) continue
+        if (j + d < logical.length && logical[j + d] === head) continue
+        if (/\s/.test(logical[j - 1])) continue
+        if (spec.wordGuard && j + d < logical.length && LOOSE_WORD_CHAR.test(logical[j + d])) continue
+        closers.push(j)
+      }
       let i = 0
       while (i + d <= logical.length) {
-        if (!logical.startsWith(spec.delim, i) || logical[i + d] === spec.delim[0] || escaped(i)) { i++; continue }
+        if (logical[i] !== head || !logical.startsWith(spec.delim, i) || logical[i + d] === head || escaped(i)) { i++; continue }
         // 开侧：后一个字符存在且不是空白（含换行）
         if (i + d >= logical.length || /\s/.test(logical[i + d])) { i++; continue }
         // `_` 词内不生效：前一个字符是 ASCII 词字符就不当开侧
         if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(logical[i - 1])) { i++; continue }
-        // 从最近的合法闭侧里挑（内容里不能再出现未转义的定界符，防跨对；可跨软换行）
-        let close = -1
-        for (let j = i + d + 1; j + d <= logical.length; j++) {
-          if (logical[j - 1] === spec.delim[0] || escaped(j)) continue
-          if (!logical.startsWith(spec.delim, j)) continue
-          if (j + d < logical.length && logical[j + d] === spec.delim[0]) continue
-          if (/\s/.test(logical[j - 1])) continue
-          if (spec.wordGuard && j + d < logical.length && LOOSE_WORD_CHAR.test(logical[j + d])) continue
-          close = j
-          break
+        // 从最近的合法闭侧里挑：候选里第一个落在开侧之后的（可跨软换行）
+        let lo = 0
+        let hi = closers.length
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1
+          if (closers[mid] < i + d + 1) lo = mid + 1
+          else hi = mid
         }
-        if (close < 0) { i++; continue }
+        if (lo >= closers.length) { i++; continue }
+        const close = closers[lo]
         const from = map[i]
         const to = map[close] + d
         if (!blocked(from, to)) {
           const closeAt = map[close]
-          ranges.push({ from, to: from + d, deco: hide(from, from + d) })
-          ranges.push({ from: closeAt, to: closeAt + d, deco: hide(closeAt, closeAt + d) })
+          // 光标在这段强调里（或紧贴两端）时定界符压淡显形，可以就地改（与合法强调同一手感）
+          const shown = within(state, from, to)
+          const delim = shown ? MARK({ class: 'cm-md-marker' }) : null
+          extras.push({ from, to })
+          ranges.push({ from, to: from + d, deco: delim ?? hide(from, from + d) })
+          ranges.push({ from: closeAt, to: closeAt + d, deco: delim ?? hide(closeAt, closeAt + d) })
           ranges.push({ from: from + d, to: closeAt, deco: MARK({ class: spec.cls }) })
           painted.push({ from, to })
         }
@@ -2039,6 +2472,10 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   // 宽松强调要避开的区间：合法强调/代码/链接由 collectInline 记，公式与高亮在下面记
   const occupy: { from: number; to: number }[] = []
   const paragraphs: { from: number; to: number }[] = []
+  // 正则类的可披露构造（高亮、宽松强调、成对行内 HTML、脚注引用），见 revealKeyOf
+  const extras: RevealExtra[] = []
+  // 整段被换成 widget 的行内构造（图片、公式）：别的正则语法（高亮）不许跨过去配对
+  const opaque: { from: number; to: number }[] = []
 
   if (flash && flash.to <= state.doc.length) {
     ranges.push({ from: flash.from, to: flash.to, deco: MARK({ class: 'cm-md-jump-flash' }) })
@@ -2046,20 +2483,21 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
 
   collectBlocks(state, ranges, front)
   collectLinks(state, ranges, front, occupy)
-  collectFootnotes(state, text, ranges, front)
-  collectHTML(state, ranges, front, zones, occupy)
-  collectImages(state, ranges, front)
+  collectFootnotes(state, text, ranges, front, extras)
+  collectHTML(state, ranges, front, zones, occupy, extras)
+  collectImages(state, ranges, front, occupy, opaque)
   collectPages(state, ranges, front)
   collectInline(state, ranges, front, occupy, paragraphs)
   collectFrontmatter(state, ranges, front, zones)
   collectTables(state, ranges, front, zones)
   collectTaskItems(state, ranges, front)
   collectMermaid(state, text, ranges, front, zones)
-  collectHighlight(state, text, ranges, excluded, dialect.highlight, occupy)
-  // 公式放最后：它覆盖区间，其它装饰不该插进它里面
-  collectMath(state, text, excluded, ranges, zones, dialect.inlineMath, occupy)
+  // 公式先于高亮：它整段被换成 widget，区间要先记进 opaque，高亮的 `==` 才知道不能
+  // 跨过去配对。入队的先后不要紧，组装前统一排序。
+  collectMath(state, text, excluded, ranges, zones, dialect.inlineMath, occupy, opaque)
+  collectHighlight(state, text, ranges, excluded, dialect.highlight, occupy, extras, opaque)
   // 宽松强调垫底：所有合法区间都记完之后才知道哪些空档可以补画
-  if (dialect.looseEmphasis) collectLooseEmphasis(state, paragraphs, occupy, ranges)
+  if (dialect.looseEmphasis) collectLooseEmphasis(state, paragraphs, occupy, ranges, extras)
 
   // 排序键必须带上 startSide：RangeSetBuilder 只接受按 (from, startSide) 递增的顺序，
   // 原来只按 (from, to) 排，同一段区间上挂了两种装饰时就翻车。
@@ -2074,14 +2512,16 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   for (const r of ranges) builder.add(r.from, r.to, r.deco)
   const deco = builder.finish()
   zonesByDeco.set(deco, zones)
+  extrasByDeco.set(deco, extras)
   return deco
 }
 
 /**
  * 装饰层。
  *
- * 文档变化、解析推进、导出开关切换时重算；单纯移动光标或拖选文字时，只有跨进/跨出
- * 块级替换区（表格、图、块公式、HTML 块、属性区）才重算，避免大文档拖选卡死（#201）。
+ * 文档变化、解析推进、导出开关切换、查找的匹配集合变化时重算；单纯移动光标或拖选
+ * 文字时，只有跨进/跨出块级替换区（表格、图、块公式、HTML 块、属性区），或者光标
+ * 换了一个可披露的构造（见 revealKeyOf），才重算，避免大文档拖选卡死（#201）。
  */
 export const livePreviewField = StateField.define<DecorationSet>({
   create: (state) => buildDecorations(state, null),
@@ -2096,11 +2536,22 @@ export const livePreviewField = StateField.define<DecorationSet>({
     const dialectChanged = tr.effects.some((effect) => effect.is(setDialectEffect))
     const clean = tr.state.field(cleanExportField, false) ?? false
     const wasClean = tr.startState.field(cleanExportField, false) ?? false
-    if (!tr.docChanged && !flash && !parsed && !rebased && !dialectChanged && clean === wasClean) {
+    // 查找：输入、上一个/下一个、关闭面板都会换一份匹配集合。当前项落在被替换的块里时
+    // 那个块要退回源码，表格 widget 里的高亮也要跟着换（见 searchCurrentIn / TableWidget）
+    const searchChanged = tr.state.field(searchStateField, false) !== tr.startState.field(searchStateField, false)
+    // 只读 ↔ 可编辑：只读时不披露标记（见 revealEnabled）
+    const editableNow = tr.state.facet(EditorView.editable) !== false
+    const editableBefore = tr.startState.facet(EditorView.editable) !== false
+    // 焦点进出编辑器：披露只对正在编辑的编辑器生效。点回原地时光标可能没动，
+    // 所以不能只靠选区指纹，焦点事件本身要触发一次重算
+    const focusChanged = tr.effects.some((effect) => effect.is(setEditorFocus))
+    if (!tr.docChanged && !flash && !parsed && !rebased && !dialectChanged && clean === wasClean
+        && !searchChanged && editableNow === editableBefore && !focusChanged) {
       if (!tr.selection) return deco
       const zones = zonesByDeco.get(deco) ?? []
       if (activeZonesKey(tr.state, zones) === activeZonesKey(tr.startState, zones)) {
-        return deco
+        const extras = extrasByDeco.get(deco) ?? []
+        if (revealKeyOf(tr.state, extras) === revealKeyOf(tr.startState, extras)) return deco
       }
     }
     return buildDecorations(tr.state, flashValue)

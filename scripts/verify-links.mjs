@@ -67,7 +67,9 @@ async function unitChecks() {
     check(`heading ${fragment}`, () => assert.equal(headingAnchorLine(md, fragment), expected))
   }
   // Exercise the real tab opener with a failed save, not a copy of its logic.
-  const code = readFileSync(join(ROOT, 'src/renderer/main.ts'), 'utf8')
+  // 源码按 LF 读：下面的切分靠 `\n}\n` 这类换行定界，而 Windows 上 `core.autocrlf` 检出的是 CRLF
+  const toLf = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+  const code = toLf(join(ROOT, 'src/renderer/main.ts'))
   const start = code.indexOf('async function openFileInNewTab(')
   const end = code.indexOf('\n// Closing several tabs', start)
   const { code: compiled } = await transform(code.slice(start, end), { loader: 'ts' })
@@ -79,7 +81,7 @@ async function unitChecks() {
   check('failed save preserves current tab', () => { assert.equal(current.filePath, source); assert.equal(opens, 0) })
 
   // Verify tableCellStart (supports indented & unbordered tables, #153)
-  const editorCode = readFileSync(join(ROOT, 'src/renderer/editor/editor.ts'), 'utf8')
+  const editorCode = toLf(join(ROOT, 'src/renderer/editor/editor.ts'))
   const tStart = editorCode.indexOf('function tableCellStart(')
   const tEnd = editorCode.indexOf('\n}\n', tStart) + 3
   const { code: compiledTableCell } = await transform(editorCode.slice(tStart, tEnd), { loader: 'ts' })
@@ -100,7 +102,7 @@ async function unitChecks() {
   })
 
   // Verify renderCode (strips closing fence without leaking backticks)
-  const cleanHtmlCode = readFileSync(join(ROOT, 'src/renderer/editor/clean-html.ts'), 'utf8')
+  const cleanHtmlCode = toLf(join(ROOT, 'src/renderer/editor/clean-html.ts'))
   const rStart = cleanHtmlCode.indexOf('function isCodeFenceStart(')
   const rEnd = cleanHtmlCode.indexOf('\nfunction renderGroup(', rStart)
   const { code: compiledCleanHtml } = await transform(cleanHtmlCode.slice(rStart, rEnd), { loader: 'ts' })
@@ -271,5 +273,15 @@ try {
   if (!process.argv.includes('--unit')) await runtimeChecks()
   console.log(`\n${passed} checks passed`)
 } finally {
-  rmSync(WORK, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  // Windows：主进程退了，GPU / 渲染等子进程还要再拖一会儿才放开目录里的文件。内置重试
+  // 总共只有一秒出头，EPERM 会把一套全绿的验收判成失败（ColaMD CT，2026-11-23）。多等几轮。
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rmSync(WORK, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+      break
+    } catch (error) {
+      if (attempt >= 6) throw error
+      await sleep(1500)
+    }
+  }
 }

@@ -14,7 +14,8 @@ import { join } from 'node:path'
 import { assertBuildFresh } from './build-freshness.mjs'
 import { stopVerifyApp, verifyWorkdir } from './verify-workdir.mjs'
 
-const APP = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+// ColaMD CT：不能用 `new URL(...).pathname`——Windows 上它是 `/D:/...`，拿去当 cwd 会 ENOENT
+const APP = join(import.meta.dirname, '..')
 assertBuildFresh()
 const { dir: WORK } = verifyWorkdir('image-export')
 

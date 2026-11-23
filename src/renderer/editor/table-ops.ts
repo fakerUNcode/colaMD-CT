@@ -27,7 +27,7 @@ export interface TableModel {
 
 // ─── 解析与序列化 ─────────────────────────────────────────────────────────────
 
-/** 一行源码按未转义 `|` 拆单元格；`\|` 还原成字面量。与 live-preview 的 parseTable 同规矩。 */
+/** 一行源码按未转义 `|` 拆单元格；`\|` 还原成字面量。与 live-preview 的 parseTableCells 同规矩。 */
 function splitRow(line: string): string[] {
   const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
   const cells: string[] = []

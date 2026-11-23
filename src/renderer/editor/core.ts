@@ -15,7 +15,7 @@ import { syntaxTree } from '@codemirror/language'
 import { undo, redo } from '@codemirror/commands'
 import { livePreview, setEditorFocus, setMeasureHost } from './live-preview'
 import { listInput } from './list-input'
-import { searchHighlightField } from './search-highlight'
+import { searchHighlightField, searchStateField } from './search-highlight'
 import { stateExtensions, editableCompartment, bodyStart } from './state'
 import { imageInputHandlers, setImageViewHost } from './image-input'
 import { tableInput } from './table-ops'
@@ -110,7 +110,7 @@ export function createEditorCore(parent: HTMLElement, options: EditorOptions = {
     // 装饰层：把源码画成所见即所得。它只画不写，所以装在这里不会影响
     // 「没改过的字节不许变」这条纪律。
     livePreview,
-    // 焦点变化要重算装饰：只有**正在编辑**的那一行才显示源码（见 live-preview 的 setEditorFocus）。
+    // 焦点变化要重算装饰：光标处的标记只在编辑器有焦点时披露（见 live-preview 的 revealEnabled）。
     // 用 DOM 事件而不是 EditorView.focusChangeEffect，是因为后者在创建时就已带焦点的编辑器上
     // 不会触发；下面创建完 view 之后补了一次初始值。
     EditorView.domEventHandlers({
@@ -133,6 +133,9 @@ export function createEditorCore(parent: HTMLElement, options: EditorOptions = {
     // 检索高亮。面板靠 effect 改它，而 effect 得有 StateField 接住；
     // 不装这一条，检索面板会以为高亮画上了，实际什么也没发生。
     searchHighlightField,
+    // ColaMD CT：匹配的位置本身（表格 widget / 公式块据此在自己的 DOM 里画高亮、
+    // 或退回源码）。不装这一条，面板派发的 setSearchState 没人接，静默什么都不做。
+    searchStateField,
     // 任务项的复选框是一个 replace widget，但没声明成原子区间时，光标能停在
     // `[ ]` 两个方框之间那一格里：左右键要一格一格挪过去，停在里面打字又把
     // `- [ ]` 敲成 `- [x]` 之类的残骸（#164）。声明成原子区间后，光标一次跨过它。
