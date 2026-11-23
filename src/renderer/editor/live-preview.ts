@@ -138,6 +138,37 @@ function pushListItemLines(state: EditorState, node: SyntaxNode, ranges: Decorat
 /** 把区间藏起来（只是看不见，文本还在）。 */
 const hide = (from: number, to: number) => Decoration.replace({})
 
+/** 画一段与源码不同的文字（HTML 实体解码后的字符）。 */
+class TextWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super()
+  }
+
+  eq(other: TextWidget): boolean {
+    return other.text === this.text
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.textContent = this.text
+    return span
+  }
+}
+
+/**
+ * HTML 实体 → 字符（`&amp;` → `&`，`&#65;` → `A`）。
+ *
+ * 借浏览器自己的实体表：塞进 textarea 的 innerHTML 再读 value。解不出来
+ * （`&nope;` 这种不存在的实体）读回的还是原文，按 CommonMark 规范保持字面。
+ */
+function decodeEntity(raw: string): string | null {
+  if (typeof document === 'undefined') return null
+  const decoder = document.createElement('textarea')
+  decoder.innerHTML = raw
+  const value = decoder.value
+  return value === raw || value === '' ? null : value
+}
+
 /**
  * 藏掉一个标记字符，**连同它后面那个空格**。
  *
@@ -581,7 +612,8 @@ function collectMath(
 // 一条装饰：把 `==` 藏起来、给中间加个底色。没有节点要建，也没有规则要注册。
 
 /** `==高亮==` 的匹配。不吃跨行，也不吃空的 `====`。 */
-const HIGHLIGHT_RE = /(?<![=])==(?!=)([^=\n]+?)==(?!=)/g
+// ColaMD CT：允许跨软换行（`前==高亮\n续行==后`），但不跨空行
+const HIGHLIGHT_RE = /(?<![=])==(?!=)((?:(?!\n\s*\n)[^=])+?)==(?!=)/g
 
 function collectHighlight(state: EditorState, text: string, ranges: DecorationRange[], excluded: Excluded[], enabled: boolean, occupy?: { from: number; to: number }[]): void {
   if (!enabled) return
@@ -802,12 +834,14 @@ class TableWidget extends WidgetType {
     readonly from: number,
     readonly to: number,
     readonly inlineMath = true,
+    readonly looseEmphasis = true,
   ) {
     super()
   }
 
   eq(other: TableWidget): boolean {
-    return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to && other.inlineMath === this.inlineMath
+    return other.source === this.source && other.base === this.base && other.from === this.from && other.to === this.to
+      && other.inlineMath === this.inlineMath && other.looseEmphasis === this.looseEmphasis
   }
 
   toDOM(): HTMLElement {
@@ -909,9 +943,20 @@ function alignOf(delimiter: string): string {
  * 这里早期只写了 `_` 配对，会把中间那段吃掉变成斜体，连下划线本身也不见了。
  * `*` 不受这条限制（`a*b*c` 在 CommonMark 里确实是斜体），所以两个分支分开写。
  * 边界用 Unicode 字母与数字，中文也算词字符。
+ *
+ * ColaMD CT（2026-11-23 全语法审计）：单元格里的行内语法此前只有扁平的一层匹配，
+ * 嵌套强调（`**粗 *斜* 粗**`）里层不渲染，高亮、转义、实体、行内 HTML、上下标、
+ * 自动链接一概不认。现在是递归渲染，覆盖面与正文的装饰层对齐：
+ *   - 容器类（粗/斜/删/高亮）把内层切片交给同一函数递归；
+ *   - 反斜杠转义先于强调被吃掉，闭合定界符不许被转义；
+ *   - 行内 HTML 的语义标签挂对应的 cm-md-html-* 类（见 collectHTML），带其它属性的
+ *     整段交给消毒器；`<br>`、`<img>` 这类单标签消毒后直接画。
  */
 const INLINE_RE =
-  /\*\*(?<strong>.+?)\*\*|(?<![\p{L}\p{N}_])__(?<strongU>(?=\S).+?(?<=\S))__(?![\p{L}\p{N}_])|\*(?<em>.+?)\*|(?<![\p{L}\p{N}_])_(?<emU>(?=\S).+?(?<=\S))_(?![\p{L}\p{N}_])|`(?<code>[^`]+)`|~~(?<strike>.+?)~~|!\[(?<alt>[^\]]*)\]\(\s*(?<src><[^>]*>|[^)\s]+)[^)]*\)|\[(?<linkText>[^\]]*)\]\((?<href>[^)]*)\)|<br\s*\/?>/giud
+  /`(?<code>[^`]+)`|\*\*(?<strong>.+?)(?<!\\)\*\*|(?<![A-Za-z0-9_])__(?<strongU>(?=\S).+?(?<=\S))(?<!\\)__(?![A-Za-z0-9_])|(?<!\*)\*(?<em>.+?)(?<!\\)\*(?!\*)|(?<![A-Za-z0-9_])_(?<emU>(?=\S).+?(?<=\S))(?<!\\)_(?![A-Za-z0-9_])|~~(?<strike>.+?)(?<!\\)~~|==(?<highlight>.+?)(?<!\\)==|!\[(?<alt>[^\]]*)\]\(\s*(?<src><[^>]*>|[^)\s]+)[^)]*\)|\[(?<linkText>[^\]]*)\]\((?<href>[^)]*)\)|<(?<autolink>[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>]+|[^\s<>@]+@[^\s<>@]+)>|\\(?<escape>[!-/:-@\[-`{-~])|&(?<entity>[a-zA-Z][a-zA-Z0-9]{1,31}|#\d{1,7}|#[xX][0-9a-fA-F]{1,6});|(?<htmlTag><\/?[a-zA-Z][^<>]*\/?>)|<br\s*\/?>/giud
+
+/** Unicode 词字符（含汉字）。严格方言下，下划线强调的两侧不许是它。 */
+const UNICODE_WORD_CHAR = /[\p{L}\p{N}_]/u
 
 /** 单元格里的行内代码区间：反引号里的 `$` 不是公式定界符。 */
 function codeSpanRanges(text: string): Excluded[] {
@@ -943,8 +988,38 @@ function appendCellText(parent: HTMLElement, text: string, math: MathRange[], fr
 function appendInline(parent: HTMLElement, text: string, base: string | null, inlineMath = true): void {
   // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉；方言关掉行内公式时按普通文字走
   const math = inlineMath ? scanMath(text, codeSpanRanges(text)) : []
+  appendInlineRange(parent, text, base, math)
+}
+
+/** 单元格里嵌套的行内 HTML 闭标签位置（同名标签按计数配对）。返回 null = 没配上。 */
+function cellCloseTag(text: string, from: number, name: string): { from: number; to: number } | null {
+  const re = new RegExp(`<(/?)\\s*${name}\\s*(/?)\\s*>`, 'gi')
+  re.lastIndex = from
+  let depth = 1
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    const closing = match[1] === '/'
+    const selfClosing = match[2] === '/'
+    if (closing) {
+      depth--
+      if (depth === 0) return { from: match.index, to: match.index + match[0].length }
+    } else if (!selfClosing) {
+      depth++
+    }
+  }
+  return null
+}
+
+function appendInlineRange(parent: HTMLElement, text: string, base: string | null, math: MathRange[]): void {
   const write = (target: HTMLElement, from: number, to: number): void =>
     appendCellText(target, text, math, from, to)
+  // 容器的内层：切成子文本递归，公式范围换算到子文本坐标
+  const recurse = (target: HTMLElement, from: number, to: number): void => {
+    const subMath = math
+      .filter((range) => range.from >= from && range.to <= to)
+      .map((range) => ({ ...range, from: range.from - from, to: range.to - from }))
+    appendInlineRange(target, text.slice(from, to), base, subMath)
+  }
 
   INLINE_RE.lastIndex = 0
   let last = 0
@@ -958,27 +1033,48 @@ function appendInline(parent: HTMLElement, text: string, base: string | null, in
       INLINE_RE.lastIndex = inside.to
       continue
     }
-    if (match.index > last) write(parent, last, match.index)
+    if (index > last) write(parent, last, index)
     const g = match.groups ?? {}
     const at = match.indices?.groups ?? {}
+    const matchEnd = index + match[0].length
+    // 严格方言（偏好设置关掉「宽松强调」）：下划线强调不跨词内生效，汉字也算词字符
+    // （与正文、与 2.6 的行为一致）。宽松方言下只拦 ASCII 词字符，`前__加粗__后` 照常渲染。
+    if (!documentDialect.looseEmphasis && (g.strongU !== undefined || g.emU !== undefined)) {
+      const before = index > 0 ? text[index - 1] : ''
+      const after = matchEnd < text.length ? text[matchEnd] : ''
+      if (UNICODE_WORD_CHAR.test(before) || UNICODE_WORD_CHAR.test(after)) {
+        write(parent, index, index + 1)
+        last = index + 1
+        INLINE_RE.lastIndex = last
+        continue
+      }
+    }
+    // 成对的行内 HTML 可能一次吃掉开标签到闭标签的整段，记录吃到哪儿
+    let consumedTo = -1
     if (g.strong !== undefined || g.strongU !== undefined) {
       const el = document.createElement('strong')
       const [from, to] = at.strong ?? at.strongU ?? [0, 0]
-      write(el, from, to)
+      recurse(el, from, to)
       parent.appendChild(el)
     } else if (g.em !== undefined || g.emU !== undefined) {
       const el = document.createElement('em')
       const [from, to] = at.em ?? at.emU ?? [0, 0]
-      write(el, from, to)
+      recurse(el, from, to)
       parent.appendChild(el)
     } else if (g.code !== undefined) {
       const el = document.createElement('code')
-      el.textContent = g.code
+      el.textContent = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? g.code.slice(1, -1) : g.code
       parent.appendChild(el)
     } else if (g.strike !== undefined) {
       const el = document.createElement('s')
       const [from, to] = at.strike ?? [0, 0]
-      write(el, from, to)
+      recurse(el, from, to)
+      parent.appendChild(el)
+    } else if (g.highlight !== undefined) {
+      const el = document.createElement('mark')
+      el.className = 'cm-md-highlight'
+      const [from, to] = at.highlight ?? [0, 0]
+      recurse(el, from, to)
       parent.appendChild(el)
     } else if (g.alt !== undefined) {
       const img = document.createElement('img')
@@ -989,15 +1085,56 @@ function appendInline(parent: HTMLElement, text: string, base: string | null, in
       const el = document.createElement('a')
       const [from, to] = at.linkText ?? [0, 0]
       // 空文字的空链接仍然把地址顶上来，否则格子里什么都看不见
-      if (to > from) write(el, from, to)
+      if (to > from) recurse(el, from, to)
       else el.textContent = g.href ?? ''
       const href = (g.href ?? '').trim()
       if (/^https?:\/\//i.test(href)) el.setAttribute('href', href)
       parent.appendChild(el)
+    } else if (g.autolink !== undefined) {
+      const address = g.autolink
+      const el = document.createElement('a')
+      el.textContent = address
+      el.setAttribute('href', /^[a-z][a-z0-9+.-]*:/i.test(address) ? address : `mailto:${address}`)
+      parent.appendChild(el)
+    } else if (g.escape !== undefined) {
+      parent.appendChild(document.createTextNode(g.escape))
+    } else if (g.entity !== undefined) {
+      const decoded = decodeEntity(match[0])
+      parent.appendChild(document.createTextNode(decoded ?? match[0]))
+    } else if (g.htmlTag !== undefined) {
+      const tag = parseHtmlTag(g.htmlTag)
+      const close = tag && !tag.closing && !tag.selfClosing && !HTML_VOID.has(tag.name)
+        ? cellCloseTag(text, matchEnd, tag.name)
+        : null
+      if (tag && close) {
+        const styleAttr = /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag.attrs)
+        const style = styleAttr ? cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '') : ''
+        const otherAttrs = tag.attrs.replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*')/i, '').trim()
+        const semantic = HTML_SEMANTIC[tag.name]
+        const el = document.createElement('span')
+        if (!semantic && otherAttrs) {
+          // 带其它属性的标签：整段交给消毒器画成真 HTML
+          el.className = 'cm-md-html-inline'
+          el.appendChild(sanitizeHTML(text.slice(index, close.to)))
+        } else {
+          if (semantic) el.classList.add(`cm-md-html-${semantic}`)
+          if (style) el.setAttribute('style', style)
+          recurse(el, matchEnd, close.from)
+        }
+        parent.appendChild(el)
+        consumedTo = close.to
+      } else {
+        // 单标签（<br>、<img>）或没配上对的标签：消毒后画出来
+        const el = document.createElement('span')
+        el.className = 'cm-md-html-inline'
+        el.appendChild(sanitizeHTML(g.htmlTag))
+        parent.appendChild(el)
+      }
     } else if (/^<br/i.test(match[0])) {
       parent.appendChild(document.createElement('br'))
     }
-    last = match.index + match[0].length
+    last = consumedTo >= 0 ? consumedTo : matchEnd
+    INLINE_RE.lastIndex = last
   }
   if (last < text.length) write(parent, last, text.length)
 }
@@ -1025,7 +1162,8 @@ function collectTables(
             state.field(documentFileUrlField, false) ?? documentFileUrl,
             node.from,
             node.to,
-            dialectOf(state).inlineMath
+            dialectOf(state).inlineMath,
+            dialectOf(state).looseEmphasis
           )
         }),
       })
@@ -1044,20 +1182,89 @@ function collectTables(
  * 文字上带 `data-href`，而不是把整段换成 `<a>` widget：换成 widget 的话，链接文字里的
  * 加粗、行内代码就全没了。点击行为在 editor.ts 里，它认 `data-href`。
  */
-function collectLinks(state: EditorState, ranges: DecorationRange[], front: Range | null): void {
+/** 引用式链接的标签比对的规范化：大小写不敏感，连续空白算一个空格（CommonMark）。 */
+function normalizeLinkLabel(label: string): string {
+  return label.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+/** 文档里的引用式链接定义：`[id]: https://… "标题"` → 规范化标签 → 地址。 */
+function linkReferenceDefinitions(state: EditorState, front: Range | null): Map<string, string> {
+  const defs = new Map<string, string>()
   iterateContent(state, front, (node) => {
-    if (node.name !== 'Link') return
-    // 引用式链接 `[文字][引用]` 和脚注 `[^note]` 都没有 URL 子节点：
-    // 前者保持原样，后者交给脚注那一节画。
+    if (node.name !== 'LinkReference') return
+    const label = node.node.getChild('LinkLabel')
     const url = node.node.getChild('URL')
-    if (!url) return false
+    if (!label || !url) return false
+    defs.set(normalizeLinkLabel(state.doc.sliceString(label.from + 1, label.to - 1)), state.doc.sliceString(url.from, url.to))
+    return false
+  })
+  return defs
+}
+
+function collectLinks(state: EditorState, ranges: DecorationRange[], front: Range | null, occupy: { from: number; to: number }[]): void {
+  let defs: Map<string, string> | null = null
+  const definitions = (): Map<string, string> => (defs ??= linkReferenceDefinitions(state, front))
+
+  iterateContent(state, front, (node) => {
+    // 引用式链接 / 脚注的定义行：压淡成一行「定义」，不再是夹在正文里的一串方括号。
+    // 不整个藏掉——藏了用户就看不到自己写过什么（与脚注定义同一条规矩）。
+    if (node.name === 'LinkReference') {
+      const label = node.node.getChild('LinkLabel')
+      const isFootnote = !!label && state.doc.sliceString(label.from, label.from + 2) === '[^'
+      // 脚注定义（`[^1]: 说明`）由脚注那一节压淡，这里只管链接定义
+      if (!isFootnote) pushBlockLines(state, node.from, Math.max(node.from, node.to - 1), 'cm-md-linkdef', ranges)
+      return false
+    }
+    // 自动链接 `<https://…>`、`<a@b.com>`：尖括号只是指令，地址本身就是链接文字
+    if (node.name === 'Autolink') {
+      const url = node.node.getChild('URL')
+      if (!url || isActiveRange(state, node.from, node.to)) return false
+      const href = state.doc.sliceString(url.from, url.to)
+      const isMail = !/^[a-z][a-z0-9+.-]*:/i.test(href)
+      for (const mark of node.node.getChildren('LinkMark')) {
+        ranges.push({ from: mark.from, to: mark.to, deco: hide(mark.from, mark.to) })
+      }
+      occupy.push({ from: node.from, to: node.to })
+      ranges.push({
+        from: url.from,
+        to: url.to,
+        deco: MARK({ class: 'cm-md-link', attributes: { 'data-href': isMail ? `mailto:${href}` : href } }),
+      })
+      return false
+    }
+    if (node.name !== 'Link') return
     if (isActiveRange(state, node.from, node.to)) return false
-    const head = state.doc.sliceString(node.from, url.from)
-    const cut = head.lastIndexOf('](')
-    if (cut < 1) return false
-    const textTo = node.from + cut
-    if (textTo <= node.from + 1) return false
-    const href = state.doc.sliceString(url.from, url.to)
+    const url = node.node.getChild('URL')
+    const label = node.node.getChild('LinkLabel')
+    let href: string
+    let textTo: number
+    if (url) {
+      // 行内链接 `[文字](地址 "标题")`
+      const head = state.doc.sliceString(node.from, url.from)
+      const cut = head.lastIndexOf('](')
+      if (cut < 1) return false
+      textTo = node.from + cut
+      if (textTo <= node.from + 1) return false
+      href = state.doc.sliceString(url.from, url.to)
+    } else {
+      // 引用式链接 `[文字][id]` / `[文字][]` / `[文字]`：地址在文档别处的定义里。
+      // 脚注 `[^1]` 也是这个形状，交给脚注那一节画。
+      const isFootnote = state.doc.sliceString(node.from + 1, Math.min(node.to, node.from + 2)) === '^'
+        || (!!label && state.doc.sliceString(label.from + 1, Math.min(label.to, label.from + 2)) === '^')
+      if (isFootnote) return false
+      const text = state.doc.sliceString(node.from, label ? label.from : node.to)
+      const close = text.lastIndexOf(']')
+      if (close < 1) return false
+      textTo = node.from + close
+      const labelText = label
+        ? state.doc.sliceString(label.from + 1, label.to - 1)
+        : state.doc.sliceString(node.from + 1, textTo)
+      const defined = definitions().get(normalizeLinkLabel(labelText))
+      // 没有对应定义就不是链接（CommonMark 判它为普通文字），保持原样
+      if (defined === undefined) return false
+      href = defined
+    }
+    occupy.push({ from: node.from, to: node.to })
     ranges.push({ from: node.from, to: node.from + 1, deco: hide(node.from, node.from + 1) })
     ranges.push({ from: textTo, to: node.to, deco: hide(textTo, node.to) })
     ranges.push({
@@ -1156,28 +1363,59 @@ function collectHTML(
   ranges: DecorationRange[],
   front: Range | null,
   zones: ActiveZone[],
+  occupy: { from: number; to: number }[] = [],
 ): void {
-  // 成对的行内标签（`<span style="color:red">文字</span>`）一起处理：闭标签的起点记下来，
-  // 轮到它时就跳过。否则两个标签各自成一个 widget，样式落在空标签上（#125）。
+  // 成对的行内标签一起处理：闭标签的起点记下来，轮到它时就跳过
   const paired = new Set<number>()
   iterateContent(state, front, (node) => {
-    const block = node.name === 'HTMLBlock'
+    // 行首起的 HTML 注释是块级的 CommentBlock（连同同一行上 `-->` 之后的文字）；
+    // 交给消毒器：注释被丢掉，后面的文字照常显示。段落中间的注释由 collectInline 藏掉。
+    const block = node.name === 'HTMLBlock' || node.name === 'CommentBlock'
     if (!block && node.name !== 'HTMLTag') return
     if (block) zones.push({ from: node.from, to: node.to, kind: 'block' })
     if (block ? isBlockActive(state, node.from, node.to) : isActiveLine(state, node.from)) return false
     if (!block) {
       if (paired.has(node.from)) return false
-      const pair = inlinePair(state, node.from, node.to)
-      if (pair) {
-        paired.add(pair.closeFrom)
-        ranges.push({ from: node.from, to: node.to, deco: Decoration.replace({}) })
-        ranges.push({ from: pair.closeFrom, to: pair.closeTo, deco: Decoration.replace({}) })
-        if (pair.closeFrom > node.to) {
-          ranges.push({ from: node.to, to: pair.closeFrom, deco: Decoration.mark({ attributes: { style: pair.style } }) })
+      const tag = parseHtmlTag(state.doc.sliceString(node.from, node.to))
+      const close = tag && !tag.closing && !tag.selfClosing && !HTML_VOID.has(tag.name)
+        ? matchingCloseTag(node.node, tag.name, state)
+        : null
+      if (tag && close) {
+        paired.add(close.from)
+        const styleAttr = /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag.attrs)
+        const style = styleAttr ? cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '') : ''
+        const otherAttrs = tag.attrs.replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*')/i, '').trim()
+        const semantic = HTML_SEMANTIC[tag.name]
+        if (!semantic && otherAttrs) {
+          // 带其它属性（class / href / color…）的标签没法用「藏标签 + 加样式」表达：
+          // 整段画成真 HTML（消毒后）。里面的 markdown 不再解析——这是 HTML，本该如此。
+          occupy.push({ from: node.from, to: close.to })
+          ranges.push({
+            from: node.from,
+            to: close.to,
+            deco: Decoration.replace({ widget: new HTMLWidget(state.doc.sliceString(node.from, close.to), false, node.from, close.to) }),
+          })
+          return false
+        }
+        // 语义标签（<u>、<b>、<sub>…）：藏掉两头的标签，给中间那段文字加对应的样式。
+        // 中间仍是普通的 markdown 文字，里面的加粗、链接、公式照常渲染。
+        occupy.push({ from: node.from, to: node.to })
+        occupy.push({ from: close.from, to: close.to })
+        ranges.push({ from: node.from, to: node.to, deco: hide(node.from, node.to) })
+        ranges.push({ from: close.from, to: close.to, deco: hide(close.from, close.to) })
+        if (close.from > node.to && (semantic || style)) {
+          ranges.push({
+            from: node.to,
+            to: close.from,
+            deco: MARK(semantic
+              ? { class: `cm-md-html-${semantic}`, ...(style ? { attributes: { style } } : {}) }
+              : { attributes: { style } }),
+          })
         }
         return false
       }
     }
+    occupy.push({ from: node.from, to: node.to })
     ranges.push({
       from: node.from,
       to: node.to,
@@ -1188,22 +1426,54 @@ function collectHTML(
 }
 
 /**
- * 同一行里能配上的一对行内标签，且开标签带可用的 style。
- * 只认 style：没有样式的 `<b>`、`<br>` 之类还是走原来的单标签路径。
- * 返回闭标签的位置和过滤后的 style（只含白名单属性）。
+ * 行内 HTML 标签的语义映射：标签名 → 样式类后缀（`cm-md-html-后缀`，样式在
+ * editor-preview.css）。列在这里的标签用「藏标签 + 加样式」画，中间的文字仍是
+ * 普通的 markdown。此前的实现只认带 style 的成对标签，`<u>`、`<b>`、`<sub>`
+ * 这些最常见的语义标签被画成一对空元素，对文字毫无作用（2026-11-23 全语法审计）。
  */
-function inlinePair(state: EditorState, from: number, to: number): { closeFrom: number; closeTo: number; style: string } | null {
-  const open = /^<([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^>]*)?)>$/.exec(state.doc.sliceString(from, to))
-  if (!open) return null
-  const styleAttr = /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(open[2] ?? '')
-  if (!styleAttr) return null
-  const style = cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '')
-  if (!style) return null
-  const rest = state.doc.sliceString(to, state.doc.lineAt(from).to)
-  const close = new RegExp(`</${open[1]}\\s*>`, 'i').exec(rest)
-  if (!close) return null
-  const closeFrom = to + close.index
-  return { closeFrom, closeTo: closeFrom + close[0].length, style }
+const HTML_SEMANTIC: Record<string, string> = {
+  u: 'u', b: 'b', strong: 'b', em: 'em', i: 'em', sub: 'sub', sup: 'sup', kbd: 'kbd', mark: 'mark',
+  s: 's', del: 's', strike: 's', code: 'code', samp: 'code', tt: 'code',
+  ins: 'ins', small: 'small', big: 'big', q: 'q', abbr: 'abbr', var: 'var',
+}
+
+/** 空元素：没有闭标签，自成一体（`<br>`、`<img>`、`<hr>`）。 */
+const HTML_VOID = new Set(['br', 'img', 'hr', 'wbr', 'area', 'base', 'col', 'embed', 'source', 'track'])
+
+interface ParsedHtmlTag {
+  name: string
+  attrs: string
+  closing: boolean
+  selfClosing: boolean
+}
+
+function parseHtmlTag(raw: string): ParsedHtmlTag | null {
+  const match = /^<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^>]*)?)>$/.exec(raw)
+  if (!match) return null
+  const selfClosing = /\/\s*$/.test(match[3] ?? '')
+  return {
+    name: match[2].toLowerCase(),
+    attrs: (match[3] ?? '').replace(/\/\s*$/, ''),
+    closing: match[1] === '/',
+    selfClosing,
+  }
+}
+
+/** 在同一个块里找开标签对应的闭标签（同名标签正确计数嵌套）。 */
+function matchingCloseTag(open: SyntaxNode, name: string, state: EditorState): SyntaxNode | null {
+  let depth = 1
+  for (let sibling = open.nextSibling; sibling; sibling = sibling.nextSibling) {
+    if (sibling.name !== 'HTMLTag') continue
+    const tag = parseHtmlTag(state.doc.sliceString(sibling.from, sibling.to))
+    if (!tag || tag.name !== name) continue
+    if (tag.closing) {
+      depth--
+      if (depth === 0) return sibling
+    } else if (!tag.selfClosing) {
+      depth++
+    }
+  }
+  return null
 }
 
 // ─── 代码块的复制按钮 ────────────────────────────────────────────────────────
@@ -1362,6 +1632,27 @@ function collectBlocks(state: EditorState, ranges: DecorationRange[], front: Ran
         }
         break
       }
+      // ColaMD CT（2026-11-23 全语法审计）：缩进代码块（四个空格起头的那种）此前
+      // 完全没有代码块外观，就是一段带空格的正文。这里给它与围栏代码块同一套行类。
+      case 'CodeBlock': {
+        const firstLine = state.doc.lineAt(node.from)
+        const lastLine = state.doc.lineAt(Math.max(node.from, node.to - 1))
+        // 首行 node.from 之前的缩进 = 「这是代码」的指令宽度；其余行最多剥这么多
+        const markerWidth = node.from - firstLine.from
+        for (let n = firstLine.number; n <= lastLine.number; n++) {
+          const line = state.doc.line(n)
+          const cls = [
+            'cm-md-codeblock',
+            n === firstLine.number ? 'cm-md-codeblock-first' : '',
+            n === lastLine.number ? 'cm-md-codeblock-last' : '',
+          ].filter(Boolean).join(' ')
+          ranges.push({ from: line.from, to: line.from, deco: BLOCK(cls) })
+          const indent = /^[ \t]*/.exec(line.text)?.[0].length ?? 0
+          const strip = n === firstLine.number ? markerWidth : Math.min(indent, markerWidth)
+          if (strip > 0) ranges.push({ from: line.from, to: line.from + strip, deco: hide(line.from, line.from + strip) })
+        }
+        break
+      }
       default:
         break
     }
@@ -1394,6 +1685,14 @@ function collectInline(
 ): void {
   iterateContent(state, front, (node) => {
       if (node.name === 'Paragraph') paragraphsOut.push({ from: node.from, to: node.to })
+      // 标题里的强调同样要走宽松补画（只取文字部分，不含 # 与下划线）
+      if (/^ATXHeading[1-6]$/.test(node.name)) paragraphsOut.push({ from: node.from, to: node.to })
+      if (node.name === 'SetextHeading1' || node.name === 'SetextHeading2') {
+        const mark = node.node.getChild('HeaderMark')
+        if (mark) paragraphsOut.push({ from: node.from, to: mark.from - 1 })
+      }
+      // 链接定义行整行压淡，里面的地址/标签不再单独上链接色
+      if (node.name === 'LinkReference') return false
       const from = node.from
       const to = node.to
       const active = isActiveLine(state, from)
@@ -1434,13 +1733,70 @@ function collectInline(
           break
         }
         case 'HeaderMark': {
+          // Setext 标题（`===` / `---` 下划线）的下划线行由下面的 Setext 分支整行处理
+          if (node.node.parent?.name.startsWith('Setext')) break
           // 标题的 `#` 连同后面那个空格一起藏，否则标题会比正文右移一个字
           hideMarker(state, from, to, ranges, active)
+          break
+        }
+        // ColaMD CT（2026-11-23 全语法审计）：下面这些节点此前渲染层完全没有处理，
+        // 源码里的指令字符（反斜杠、&amp; 之类）原样露在正文里。
+        case 'SetextHeading1':
+        case 'SetextHeading2': {
+          // `标题` 下一行划 `===` / `---` 也是标题，与 # 标题同一套字号
+          const mark = node.node.getChild('HeaderMark')
+          const textTo = mark ? state.doc.lineAt(mark.from - 1).to : to
+          pushBlockLines(state, from, textTo, node.name === 'SetextHeading1' ? 'cm-md-atxheading1' : 'cm-md-atxheading2', ranges)
+          if (mark) {
+            // 下划线那一行整行收成零高，标题与下文之间不留一道空白
+            const markLine = state.doc.lineAt(mark.from)
+            ranges.push({ from: markLine.from, to: markLine.from, deco: BLOCK('cm-md-collapsed') })
+            ranges.push({ from: markLine.from, to: markLine.to, deco: hide(markLine.from, markLine.to) })
+          }
+          break
+        }
+        case 'Escape': {
+          // `\*` `\_` `\#`：反斜杠只是「下一个字符取字面」的指令，藏掉它
+          occupy.push({ from, to: from + 1 })
+          ranges.push({ from, to: from + 1, deco: hide(from, from + 1) })
+          break
+        }
+        case 'HardBreak': {
+          // 硬换行：行尾的两个空格或反斜杠不显示（换行由每一行各是一个块保证）
+          const lineTo = state.doc.lineAt(from).to
+          if (Math.min(to, lineTo) > from) ranges.push({ from, to: Math.min(to, lineTo), deco: hide(from, Math.min(to, lineTo)) })
+          break
+        }
+        case 'Entity': {
+          // `&amp;` `&#65;` 解码成字符；不认识的实体（&nope;）按规范保持原样
+          const decoded = decodeEntity(state.doc.sliceString(from, to))
+          if (decoded !== null) {
+            occupy.push({ from, to })
+            ranges.push({ from, to, deco: Decoration.replace({ widget: new TextWidget(decoded) }) })
+          }
+          break
+        }
+        case 'Comment': {
+          // HTML 注释不显示
+          occupy.push({ from, to })
+          ranges.push({ from, to, deco: hide(from, to) })
           break
         }
         case 'InlineCode': {
           occupy.push({ from, to })
           ranges.push({ from, to, deco: MARK({ class: 'cm-md-inlinecode' }) })
+          // CommonMark：内容两端同时是空格（且不全是空格）时各剥掉一格，
+          // 否则 `` ` 带空格 ` `` 会比 `` `带空格` `` 多出两头空白
+          const firstMark = node.node.firstChild
+          const lastMark = node.node.lastChild
+          if (firstMark && lastMark && firstMark.name === 'CodeMark' && lastMark.name === 'CodeMark' && lastMark.from > firstMark.to) {
+            const content = state.doc.sliceString(firstMark.to, lastMark.from)
+            if (content.length >= 2 && /^\s/.test(content[0]) && /\s$/.test(content[content.length - 1]) && content.trim() !== '') {
+              const last = lastMark.from - 1
+              ranges.push({ from: firstMark.to, to: firstMark.to + 1, deco: hide(firstMark.to, firstMark.to + 1) })
+              ranges.push({ from: last, to: last + 1, deco: hide(last, last + 1) })
+            }
+          }
           break
         }
         case 'StrongEmphasis': {
@@ -1477,18 +1833,25 @@ function collectInline(
 
 // ─── 宽松强调（ColaMD CT 方言开关）──────────────────────────────────────────
 //
-// 只补画**严格 CommonMark 因全角标点拒配**的成对标记：`**加粗**。`、`（**粗**）`
-// 的闭合 `**` 后面跟着全角标点、前面是普通字 → 严格规则判它「不能闭合」→
-// 语法树里没有 StrongEmphasis → 渲染层无从下手。这里的判定只剩两条（Typora 手感）：
+// 只补画**严格 CommonMark 拒配**的成对标记。实测（scripts/verify-markdown-syntax.mjs）
+// 严格规则在中文里的真实失效面是两类：
+//   1. 内容边缘是全角标点、后面紧跟文字：`**“他说”**然后`
+//   2. 下划线 `__` / `_` 紧贴汉字：`前__加粗__后`（CommonMark 的词内规则把汉字也算词字符）
+// 这里只剩两条判定（Typora 手感）：
 //   开侧：定界符后一个字符不是空白
 //   闭侧：定界符前一个字符不是空白
-// `_`/`__` 额外保留 CommonMark 的「词内不生效」（snake_case_name 不许变斜体）。
-// 被语法树已经认领的区间（occupy：合法强调/代码/链接/公式/高亮）一律跳过，
-// 绝不双画；缓冲区字节不动。
+// `_`/`__` 额外保留「词内不生效」，但只看 ASCII 词字符（snake_case_name 不许变斜体）。
+//
+// 扫描以**段落**为单位而不是以行：加粗跨软换行是最常见的写法
+// （`上的**分布式\n平台（Socket）**向程序`），逐行扫永远找不到这一对。
+// 引用标记（`> `）与列表缩进是块结构不是段落文字，拼逻辑文本时去掉，并保留
+// 「逻辑位置 → 文档位置」的映射，装饰最终落在文档位置上。
+// 被语法树认领的区间（occupy：合法强调/代码/链接/公式/高亮/HTML）一律跳过，绝不双画；
+// 反斜杠转义的定界符（`\*`）也不算定界符。缓冲区字节不动。
 
 // `_` 的词内防误伤只看 ASCII 词字符（snake_case_name 不能变斜体）；
 // 汉字不算（`前__加粗__后` 要能渲染——严格 CommonMark 恰恰是这批 `__` 写法
-// 在中文里全灭，宽松层的存在意义）。全量实测见 scripts/debug-dialect.mjs。
+// 在中文里全灭，宽松层的存在意义）。
 const LOOSE_WORD_CHAR = /[A-Za-z0-9_]/
 
 interface LoosePairSpec {
@@ -1515,58 +1878,77 @@ function collectLooseEmphasis(
     occupy.some((span) => from < span.to && to > span.from)
 
   for (const para of paragraphs) {
-    const text = state.doc.sliceString(para.from, para.to)
+    if (para.to <= para.from) continue
+    // 逻辑文本与位置映射：map[i] = 逻辑第 i 个字符在文档里的位置（换行符映到真实换行处）
+    const map: number[] = []
+    let logical = ''
+    let lineStart = para.from
+    while (lineStart <= para.to) {
+      const lineEnd = Math.min(state.doc.lineAt(lineStart).to, para.to)
+      const line = state.doc.sliceString(lineStart, lineEnd)
+      // 首行从节点起点开始（引用/列表标记不在节点内）；续行要剥掉行首的引用标记与缩进
+      let strip = 0
+      if (lineStart > para.from) {
+        const quote = QUOTE_PREFIX_RE.exec(line)?.[0].length ?? 0
+        const indent = /^[ \t]*/.exec(line.slice(quote))?.[0].length ?? 0
+        strip = quote + indent
+      }
+      for (let j = strip; j < line.length; j++) {
+        map.push(lineStart + j)
+        logical += line[j]
+      }
+      if (lineEnd < para.to) {
+        logical += '\n'
+        map.push(lineEnd)
+        lineStart = lineEnd + 1
+      } else {
+        break
+      }
+    }
+
     // 已画上的区间（本函数产出），单 `*` 不能跨过 `**` 配对
     const painted: { from: number; to: number }[] = []
     const blocked = (from: number, to: number) =>
       overlaps(from, to) || painted.some((span) => from < span.to && to > span.from)
-
-    let lineBase = para.from
-    for (const line of text.split('\n')) {
-      scanLooseLine(line, lineBase, blocked, painted, ranges)
-      lineBase += line.length + 1
+    // 前面紧挨着奇数个反斜杠 = 被转义的定界符（`\*`），不算定界符
+    const escaped = (index: number): boolean => {
+      let backslashes = 0
+      for (let k = index - 1; k >= 0 && logical[k] === '\\'; k--) backslashes++
+      return backslashes % 2 === 1
     }
-  }
-}
 
-function scanLooseLine(
-  line: string,
-  base: number,
-  blocked: (from: number, to: number) => boolean,
-  painted: { from: number; to: number }[],
-  ranges: DecorationRange[],
-): void {
-  for (const spec of LOOSE_SPECS) {
-    const d = spec.delim.length
-    let i = 0
-    while (i + d <= line.length) {
-      if (!line.startsWith(spec.delim, i) || line[i + d] === spec.delim[0]) { i++; continue }
-      // 开侧：后一个字符存在且不是空白
-      if (i + d >= line.length || /\s/.test(line[i + d])) { i++; continue }
-      // `_` 词内不生效：前一个字符是词字符就不当开侧
-      if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(line[i - 1])) { i++; continue }
-      // 内容里不能再出现定界符（防跨对），从最近一个合法闭侧里挑
-      const contentStart = i + d
-      let close = -1
-      for (let j = contentStart + 1; j + d <= line.length; j++) {
-        if (line[j - 1] === spec.delim[0]) continue
-        if (!line.startsWith(spec.delim, j)) continue
-        if (line[j + d] === spec.delim[0]) continue
-        if (line[j - 1] === undefined || /\s/.test(line[j - 1])) continue
-        if (spec.wordGuard && j + d < line.length && LOOSE_WORD_CHAR.test(line[j + d])) continue
-        close = j
-        break
+    for (const spec of LOOSE_SPECS) {
+      const d = spec.delim.length
+      let i = 0
+      while (i + d <= logical.length) {
+        if (!logical.startsWith(spec.delim, i) || logical[i + d] === spec.delim[0] || escaped(i)) { i++; continue }
+        // 开侧：后一个字符存在且不是空白（含换行）
+        if (i + d >= logical.length || /\s/.test(logical[i + d])) { i++; continue }
+        // `_` 词内不生效：前一个字符是 ASCII 词字符就不当开侧
+        if (spec.wordGuard && i > 0 && LOOSE_WORD_CHAR.test(logical[i - 1])) { i++; continue }
+        // 从最近的合法闭侧里挑（内容里不能再出现未转义的定界符，防跨对；可跨软换行）
+        let close = -1
+        for (let j = i + d + 1; j + d <= logical.length; j++) {
+          if (logical[j - 1] === spec.delim[0] || escaped(j)) continue
+          if (!logical.startsWith(spec.delim, j)) continue
+          if (j + d < logical.length && logical[j + d] === spec.delim[0]) continue
+          if (/\s/.test(logical[j - 1])) continue
+          if (spec.wordGuard && j + d < logical.length && LOOSE_WORD_CHAR.test(logical[j + d])) continue
+          close = j
+          break
+        }
+        if (close < 0) { i++; continue }
+        const from = map[i]
+        const to = map[close] + d
+        if (!blocked(from, to)) {
+          const closeAt = map[close]
+          ranges.push({ from, to: from + d, deco: hide(from, from + d) })
+          ranges.push({ from: closeAt, to: closeAt + d, deco: hide(closeAt, closeAt + d) })
+          ranges.push({ from: from + d, to: closeAt, deco: MARK({ class: spec.cls }) })
+          painted.push({ from, to })
+        }
+        i = close + d
       }
-      if (close < 0) { i++; continue }
-      const from = base + i
-      const to = base + close + d
-      if (!blocked(from, to)) {
-        ranges.push({ from, to: from + d, deco: hide(from, from + d) })
-        ranges.push({ from: base + close, to: base + close + d, deco: hide(base + close, base + close + d) })
-        ranges.push({ from: from + d, to: base + close, deco: MARK({ class: spec.cls }) })
-        painted.push({ from, to })
-      }
-      i = close + d
     }
   }
 }
@@ -1663,9 +2045,9 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   }
 
   collectBlocks(state, ranges, front)
-  collectLinks(state, ranges, front)
+  collectLinks(state, ranges, front, occupy)
   collectFootnotes(state, text, ranges, front)
-  collectHTML(state, ranges, front, zones)
+  collectHTML(state, ranges, front, zones, occupy)
   collectImages(state, ranges, front)
   collectPages(state, ranges, front)
   collectInline(state, ranges, front, occupy, paragraphs)

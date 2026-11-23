@@ -446,14 +446,10 @@ body.platform-win #titlebar {
   display: none;
 }
 
-/* The Windows menu button is the row's first child, so it gets its own air
-   instead of the 8px gap the right-hand cluster uses: the row's 6px gutter is
-   its left margin, and 6px on the right puts the glyph exactly halfway between
-   the window's edge and the line the document's strip starts on. Inheriting the
-   shared margin-left left it jammed against the first tab (2026-09-15). */
-#titlebar > #app-menu-btn {
-  margin-left: 0;
-  margin-right: 6px;
+/* ColaMD CT：菜单拆成了五个模块按钮（.app-menu-btn，间距在 index.html 的预加载
+   样式里）。面板开着时对应按钮压一层淡底，表示「这一栏正展开着」。 */
+#titlebar > .app-menu-btn.active {
+  background: color-mix(in srgb, var(--row-icon-color) 16%, transparent);
 }
 
 /* One focus ring for the whole shell, drawn in the theme's own ink. The platform
@@ -1617,10 +1613,30 @@ body.presenting #editor .cm-content svg {
 
 .colamd-menu-hint {
   flex: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-secondary, var(--text-muted, var(--text-color)));
   font-family: var(--font-mono, monospace);
   font-size: 11px;
   opacity: 0.75;
+}
+
+/* 只有「路径」类提示走 RTL：省略号落在开头，长路径留下最要紧的尾部。
+   快捷键提示不能用它——以符号开头的 `/Ctrl`、`+\Ctrl` 会被双向算法倒过来排。 */
+.colamd-menu-hint-path {
+  direction: rtl;
+  text-align: left;
+}
+
+.colamd-menu-item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.colamd-menu-item:disabled:hover {
+  background: transparent;
 }
 
 .colamd-menu-arrow {

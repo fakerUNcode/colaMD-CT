@@ -120,6 +120,9 @@ export interface ElectronAPI {
   setLanguage: (language: 'zh' | 'en') => Promise<void>
   getRestoreOnLaunch: () => Promise<boolean>
   setRestoreOnLaunch: (enabled: boolean) => Promise<void>
+  getRecentFiles: () => Promise<string[]>
+  newWindow: () => Promise<void>
+  toggleFullscreen: () => Promise<void>
   setDefaultApp: () => Promise<void>
   openWhatsNew: () => Promise<void>
   openCheatsheet: () => Promise<void>
@@ -328,6 +331,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setRestoreOnLaunch: (enabled: boolean) => {
     return ipcRenderer.invoke('set-restore-on-launch', enabled) as Promise<void>
   },
+  getRecentFiles: () => ipcRenderer.invoke('get-recent-files') as Promise<string[]>,
+  newWindow: () => ipcRenderer.invoke('new-window') as Promise<void>,
+  toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen') as Promise<void>,
   setDefaultApp: () => ipcRenderer.invoke('set-default-app') as Promise<void>,
   openWhatsNew: () => ipcRenderer.invoke('open-whats-new') as Promise<void>,
   openCheatsheet: () => ipcRenderer.invoke('open-cheatsheet') as Promise<void>,

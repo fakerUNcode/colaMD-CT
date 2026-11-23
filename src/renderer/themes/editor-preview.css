@@ -809,3 +809,105 @@ body.theme-notion .cm-content .cm-md-url {
   height: 0;
   line-height: 0;
 }
+
+/* ColaMD CT（2026-11-23 全语法审计）补齐的渲染 */
+
+/* 该整行收成零高的「指令行」：Setext 标题下方的 `===` / `---`。
+   与属性区收起同一个做法（零高 + 藏内容），上下不留空白。 */
+.cm-content .cm-md-collapsed {
+  height: 0;
+  line-height: 0;
+}
+
+/* 引用式链接的定义行 `[id]: https://…`：压淡成一行「定义」，与脚注定义同一规矩
+   （不整个藏掉——藏了用户就看不到自己写过什么）。 */
+.cm-content .cm-md-linkdef,
+.cm-content .cm-md-linkdef .cm-md-url {
+  color: var(--text-muted);
+  font-size: 0.85em;
+}
+
+/* 行内 HTML 的语义标签（`<u>`、`<b>`、`<sub>`…）。渲染层藏掉两头的标签、给中间
+   那段文字挂上对应的类（见 live-preview 的 collectHTML / HTML_SEMANTIC），
+   中间仍是普通 markdown。此前这些标签被画成一对空元素，对文字毫无作用。 */
+.cm-content .cm-md-html-u {
+  text-decoration: underline;
+}
+
+.cm-content .cm-md-html-b {
+  font-weight: 700;
+}
+
+.cm-content .cm-md-html-em {
+  font-style: italic;
+}
+
+.cm-content .cm-md-html-s {
+  text-decoration: line-through;
+}
+
+.cm-content .cm-md-html-ins {
+  text-decoration: underline;
+}
+
+.cm-content .cm-md-html-sub {
+  vertical-align: sub;
+  font-size: smaller;
+}
+
+.cm-content .cm-md-html-sup {
+  vertical-align: super;
+  font-size: smaller;
+}
+
+.cm-content .cm-md-html-small {
+  font-size: 0.85em;
+}
+
+.cm-content .cm-md-html-big {
+  font-size: 1.15em;
+}
+
+.cm-content .cm-md-html-mark {
+  background: var(--highlight-bg, #fff3bf);
+  border-radius: 3px;
+  padding: 0 0.15em;
+}
+
+.cm-content .cm-md-html-code {
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 0.875em;
+  font-family: var(--font-mono);
+}
+
+.cm-content .cm-md-html-kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border-color);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--code-bg);
+  color: var(--text-color);
+  font-family: var(--font-mono);
+  font-size: 0.8em;
+  line-height: 1.5;
+}
+
+.cm-content .cm-md-html-q {
+  quotes: '“' '”';
+}
+
+.cm-content .cm-md-html-q::before {
+  content: open-quote;
+}
+
+.cm-content .cm-md-html-q::after {
+  content: close-quote;
+}
+
+.cm-content .cm-md-html-abbr[title],
+.cm-content .cm-md-html-var {
+  font-style: italic;
+}

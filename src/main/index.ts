@@ -2603,6 +2603,16 @@ ipcMain.handle('set-restore-on-launch', (_event, enabled: unknown) => {
   if (typeof enabled === 'boolean') setRestoreOnLaunch(enabled)
 })
 
+// 标题栏模块菜单（渲染端 app-menu.ts）需要的三个主进程动作
+ipcMain.handle('get-recent-files', () => recentFiles())
+ipcMain.handle('new-window', () => {
+  createWindow()
+})
+ipcMain.handle('toggle-fullscreen', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) win.setFullScreen(!win.isFullScreen())
+})
+
 ipcMain.handle('settings:update', (_event, patch: SettingsPatch) => {
   const before = getMergedAccelerators()
   const next = updateSettings(patch ?? {})

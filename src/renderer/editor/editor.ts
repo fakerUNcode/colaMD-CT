@@ -122,7 +122,19 @@ export type { FormatCommandId }
 export function runFormatCommand(id: FormatCommandId): void {
   const view = getEditorHandle()?.getView()
   if (!view) return
+  // ColaMD CT：命令也可能来自标题栏的模块菜单（DOM 按钮）。按钮被点过之后焦点可能
+  // 落在它身上——那不是「用户在别处输入」，把焦点接回编辑器再执行；否则格式命令的
+  // hasFocus 守卫会把这一下整个吞掉。焦点真的在别的输入框里（搜索、偏好设置、
+  // 表格单元格）时保持原样：那种时候格式化本来就不该落在正文上。
+  if (!view.hasFocus && !focusInOtherTextField(document.activeElement)) view.focus()
   runFormat(view, id)
+}
+
+function focusInOtherTextField(target: Element | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tag = target.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  return target.isContentEditable && !target.closest('.cm-content') || !!target.closest('.cm-md-table-widget')
 }
 
 // --- 生命周期 ---

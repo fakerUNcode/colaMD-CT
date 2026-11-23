@@ -16,7 +16,7 @@ import { setImageDocPathProvider } from './editor/image-input'
 import { loadTableWidthsFor, runTableMenuAction, setRememberTableWidths, type TableAction } from './editor/table-ops'
 import { primeDialect, setDialectEffect } from './editor/live-preview'
 import { showPreferences } from './preferences'
-import { setupAppMenu, toggleAppMenu } from './app-menu'
+import { setupAppMenu, bindModuleButtons, MENU_MODULES } from './app-menu'
 import { mergeAccelerators } from '../shared/commands'
 import type { AppSettings } from '../shared/settings-types'
 import './themes/base.css'
@@ -1027,13 +1027,16 @@ function updateSourceToggle(): void {
 function updateUiLanguage(): void {
   const zh = isChinese()
   document.documentElement.lang = zh ? 'zh-CN' : 'en'
-  document.title = 'ColaMD'
+  document.title = 'ColaMD CT'
   untitledName = zh ? '未命名' : 'Untitled'
   fileTabEl().textContent = zh ? '文件' : 'Files'
   outlineTabEl().textContent = zh ? '大纲' : 'Outline'
   setToolbarTip(fileToggleBtnEl(), zh ? '显示 / 隐藏文件列表 (⌘\\)' : 'Show / Hide File List (⌘\\)')
-  const menuBtn = document.getElementById('app-menu-btn')
-  if (menuBtn) setToolbarTip(menuBtn, zh ? '菜单' : 'Menu')
+  // ColaMD CT：左上角的菜单拆成了五个模块按钮，提示语跟着界面语言走
+  for (const module of MENU_MODULES) {
+    const button = document.getElementById(`app-menu-btn-${module.id}`)
+    if (button) setToolbarTip(button, zh ? module.zh : module.en)
+  }
   updateSourceToggle()
   updateWordCount()
 }
@@ -1860,7 +1863,8 @@ async function init(): Promise<void> {
   // hidden (the Alt key still reveals the system one).
   if (/Windows/i.test(navigator.userAgent)) {
     document.body.classList.add('platform-win')
-    document.getElementById('app-menu-btn')?.removeAttribute('hidden')
+    // ColaMD CT：菜单拆成了五个模块按钮（文件 / 格式 / 插入 / 视图 / 更多）
+    for (const module of MENU_MODULES) document.getElementById(`app-menu-btn-${module.id}`)?.removeAttribute('hidden')
   }
   const language = await api.getLanguage()
   fileManagerName = await api.getFileManagerName()
@@ -2136,7 +2140,8 @@ async function init(): Promise<void> {
     language: () => (isChinese() ? 'zh' : 'en'),
     preferences: () => showPreferences(),
   })
-  document.getElementById('app-menu-btn')?.addEventListener('click', () => toggleAppMenu())
+  // 每个模块按钮：点一下展开/收起自己的面板；面板开着时划过别的按钮直接切换
+  bindModuleButtons()
   api.onLanguageChanged((language: UiLanguage) => {
     setUiLanguage(language)
     searchPanel.setLanguage(language)

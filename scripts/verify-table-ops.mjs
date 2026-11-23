@@ -282,96 +282,119 @@ async function main() {
       check('Esc 关闭信息卡', (await evaluate(renderer, `!document.querySelector('.colamd-image-info')`)) === true)
     }
 
-    // 10) 主题化应用菜单（Windows 汉堡按钮）：面板跟主题分区、偏好设置独立行、
-    //     主题二级面板、点偏好设置能打开弹窗
-    const menuBtn = await evaluate(renderer, `(() => {
-      const btn = document.getElementById('app-menu-btn')
-      if (!btn) return null
-      const r = btn.getBoundingClientRect()
-      return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 })
-    })()`)
-    check('汉堡菜单按钮存在（Windows 标题栏）', !!menuBtn)
-    if (menuBtn) {
-      const btn = JSON.parse(menuBtn)
-      for (const type of ['mousePressed', 'mouseReleased']) {
-        await renderer.send('Input.dispatchMouseEvent', { type, x: btn.x, y: btn.y, button: 'left', clickCount: 1 })
-      }
-      await sleep(200)
-      const menuText = await evaluate(renderer, `(() => {
-        const panel = document.querySelector('.colamd-menu-panel')
-        return panel ? panel.textContent : ''
-      })()`)
-      check('点击汉堡弹出主题化菜单面板', menuText.length > 0, 'panel 未出现')
-      check('偏好设置独立成行（primary）', (await evaluate(renderer, `!!document.querySelector('.colamd-menu-item-primary')`)) === true)
-      check('菜单按功能分区（文档/视图/导出）',
-        /文档|Document/.test(menuText) && /视图|View/.test(menuText) && /导出|Export/.test(menuText),
-        `text=${menuText.slice(0, 80)}`)
-      check('菜单背景跟随主题变量', (await evaluate(renderer, `(() => {
-        const panel = document.querySelector('.colamd-menu-panel')
-        if (!panel) return false
-        const bg = getComputedStyle(panel).backgroundColor
-        return bg !== 'rgba(0, 0, 0, 0)' && bg !== 'rgb(255, 255, 255)' ? true : true
-      })()`)) === true)
-      // 主题二级面板：悬停带 ▸ 的行
-      const themeRow = await evaluate(renderer, `(() => {
-        const row = document.querySelector('.colamd-menu-has-flyout')
-        if (!row) return null
-        const r = row.getBoundingClientRect()
-        return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 })
-      })()`)
-      if (themeRow) {
-        await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: JSON.parse(themeRow).x, y: JSON.parse(themeRow).y })
-        await sleep(200)
-        check('主题二级面板弹出', (await evaluate(renderer, `!!document.querySelector('.colamd-menu-flyout')`)) === true)
-      }
-      // 点「偏好设置」打开弹窗
-      const prefRow = await evaluate(renderer, `(() => {
-        const row = document.querySelector('.colamd-menu-item-primary')
-        if (!row) return null
-        const r = row.getBoundingClientRect()
-        return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 })
-      })()`)
-      if (prefRow) {
-        const p = JSON.parse(prefRow)
-        for (const type of ['mousePressed', 'mouseReleased']) {
-          await renderer.send('Input.dispatchMouseEvent', { type, x: p.x, y: p.y, button: 'left', clickCount: 1 })
-        }
-        await sleep(250)
-        check('点偏好设置打开设置弹窗', (await evaluate(renderer, `!!document.querySelector('.colamd-pref-modal')`)) === true)
-        // 收尾：取消弹窗
-        const cancel = await evaluate(renderer, `(() => {
-          const btn = document.querySelector('.colamd-pref-modal .math-modal-footer .math-modal-btn.cancel')
-          if (!btn) return null
-          const r = btn.getBoundingClientRect()
+    // 10) 模块菜单（Windows 标题栏，2026-11-23 改版）：左上角拆成五个极简按钮，
+    //     各自展开自己的面板；「格式」里的命令点一下立刻生效（快速设置格式）；
+    //     面板开着时划过另一个模块按钮直接切换。
+    {
+      const centerOf = async (selectorExpr) => {
+        const raw = await evaluate(renderer, `(() => {
+          const el = ${selectorExpr}
+          if (!el) return 'null'
+          const r = el.getBoundingClientRect()
           return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 })
         })()`)
-        if (cancel) {
-          const c = JSON.parse(cancel)
-          for (const type of ['mousePressed', 'mouseReleased']) {
-            await renderer.send('Input.dispatchMouseEvent', { type, x: c.x, y: c.y, button: 'left', clickCount: 1 })
-          }
-          await sleep(150)
-        }
+        return raw && raw !== 'null' ? JSON.parse(raw) : null
       }
-      check('Esc/选择后菜单面板收起', (await evaluate(renderer, `!document.querySelector('.colamd-menu-panel')`)) === true)
+      const clickAt = async (point) => {
+        for (const type of ['mousePressed', 'mouseReleased']) {
+          await renderer.send('Input.dispatchMouseEvent', { type, x: point.x, y: point.y, button: 'left', clickCount: 1 })
+        }
+        await sleep(220)
+      }
+      const panelText = () => evaluate(renderer, `(() => { const p = document.querySelector('.colamd-menu-panel'); return p ? p.textContent : '' })()`)
+      const panelOpen = () => evaluate(renderer, `!!document.querySelector('.colamd-menu-panel')`)
+
+      const visible = await evaluate(renderer, `document.querySelectorAll('#titlebar .app-menu-btn:not([hidden])').length`)
+      check('标题栏有五个模块按钮（Windows）', visible === 5, `count=${visible}`)
+      const names = await evaluate(renderer, `[...document.querySelectorAll('#titlebar .app-menu-btn:not([hidden])')].map(b => b.id.replace('app-menu-btn-', '')).join(',')`)
+      check('模块为 文件/格式/插入/视图/更多', names === 'file,format,insert,view,more', names)
+
+      // 格式：选中「文字」→ 格式面板 → 点「加粗」→ 文档变成 **文字**
+      await setDoc('文字')
+      await evaluate(renderer, `${VIEW}.dispatch({ selection: { anchor: 0, head: 2 } })`)
+      await clickAt(await centerOf(`document.getElementById('app-menu-btn-format')`))
+      const formatText = await panelText()
+      check('点「格式」展开格式面板', (await panelOpen()) && /加粗|Bold/.test(formatText), formatText.slice(0, 60))
+      check('格式面板直达标题与列表', /标题|Heading/.test(formatText) && /无序列表|Bullet/.test(formatText), formatText.slice(0, 80))
+      const boldRow = await centerOf(`[...document.querySelectorAll('.colamd-menu-panel .colamd-menu-item')].find(r => /^(加粗|Bold)$/.test(r.querySelector('.colamd-menu-label')?.textContent ?? ''))`)
+      if (boldRow) {
+        await clickAt(boldRow)
+        const afterBold = await docOf()
+        check('格式面板一键加粗（选中即生效）', afterBold === '**文字**', `doc=${JSON.stringify(afterBold)}`)
+        check('选择后面板收起', (await panelOpen()) === false)
+      } else {
+        check('格式面板里有「加粗」项', false, '找不到加粗行')
+      }
+
+      // 悬停切换：开着「插入」面板时划过「视图」按钮 → 面板换成视图的
+      await clickAt(await centerOf(`document.getElementById('app-menu-btn-insert')`))
+      check('点「插入」展开插入面板', /表格|Table/.test(await panelText()), (await panelText()).slice(0, 60))
+      const viewBtn = await centerOf(`document.getElementById('app-menu-btn-view')`)
+      await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: viewBtn.x, y: viewBtn.y })
+      await sleep(250)
+      const switched = await panelText()
+      check('划过另一个模块按钮直接切换面板', /源码|Source/.test(switched) && /主题|Theme/.test(switched), switched.slice(0, 60))
+      check('切换后原按钮高亮转移', (await evaluate(renderer, `document.getElementById('app-menu-btn-view').classList.contains('active') && !document.getElementById('app-menu-btn-insert').classList.contains('active')`)) === true)
+
+      // 视图面板里的主题二级面板
+      const themeRow = await centerOf(`[...document.querySelectorAll('.colamd-menu-panel .colamd-menu-has-flyout')].find(r => /主题|Theme/.test(r.textContent))`)
+      if (themeRow) {
+        await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: themeRow.x, y: themeRow.y })
+        await sleep(250)
+        const flyText = await evaluate(renderer, `(() => { const list = document.querySelectorAll('.colamd-menu-flyout'); return list.length ? list[list.length - 1].textContent : '' })()`)
+        check('主题二级面板展开（含当前勾选）', (await evaluate(renderer, `document.querySelectorAll('.colamd-menu-flyout').length`)) >= 1 && /雅致|Elegant/.test(flyText) && /✓/.test(flyText), flyText.slice(0, 50))
+      } else {
+        check('视图面板里有「主题」二级项', false, '找不到主题行')
+      }
+      // Esc 收起
+      await press(renderer, { key: 'Escape', code: 'Escape', vkc: 27 })
+      check('Esc 收起菜单面板', (await panelOpen()) === false)
+
+      // 更多 → 偏好设置
+      await clickAt(await centerOf(`document.getElementById('app-menu-btn-more')`))
+      const moreText = await panelText()
+      check('点「更多」展开更多面板（含偏好设置）', /偏好设置|Preferences/.test(moreText), moreText.slice(0, 60))
+      const prefRow = await centerOf(`[...document.querySelectorAll('.colamd-menu-panel .colamd-menu-item')].find(r => /偏好设置|Preferences/.test(r.textContent))`)
+      if (prefRow) {
+        await clickAt(prefRow)
+        check('点偏好设置打开设置弹窗', (await evaluate(renderer, `!!document.querySelector('.colamd-pref-modal')`)) === true)
+        const cancel = await centerOf(`document.querySelector('.colamd-pref-modal .math-modal-footer .math-modal-btn.cancel')`)
+        if (cancel) await clickAt(cancel)
+      }
+      check('选择后面板收起', (await panelOpen()) === false)
+
+      // 文件面板：分区（文档 / 导出 / 系统）
+      await clickAt(await centerOf(`document.getElementById('app-menu-btn-file')`))
+      const fileText = await panelText()
+      check('文件面板按功能分区', /文档|Document/.test(fileText) && /导出|Export/.test(fileText) && /系统|System/.test(fileText), fileText.slice(0, 80))
+      await press(renderer, { key: 'Escape', code: 'Escape', vkc: 27 })
+      // 把鼠标从标题栏挪开，免得后面的用例被悬停状态干扰
+      await renderer.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 400, y: 400 })
+      await sleep(150)
     }
 
     // 11) 重大 bug 回归（2026-11-22）：同格二次点击要能挪光标；
     //     行内/块公式点击后光标落进源码、可反复进出
     {
-      // 求值器对“找不到元素”返回字符串 'null'（真值！），这里安全解析 + 短重试
+      // 求值器对“找不到元素”返回字符串 'null'（真值！），这里安全解析 + 短重试。
+      // 读到之后隔一拍再读一次，两次几何一致才算排稳定（否则点击会落空）。
       const geomOf = async (selectorExpr, tries = 4) => {
-        for (let i = 0; i < tries; i++) {
+        let previous = null
+        for (let i = 0; i < tries * 2; i++) {
           const raw = await evaluate(renderer, `(() => {
             const el = ${selectorExpr}
             if (!el) return 'null'
             const r = el.getBoundingClientRect()
             return JSON.stringify({ left: r.left, width: r.width, y: r.top + r.height / 2 })
           })()`)
-          if (raw && raw !== 'null') return JSON.parse(raw)
-          await sleep(400)
+          if (raw && raw !== 'null') {
+            const current = JSON.parse(raw)
+            if (previous && JSON.stringify(previous) === JSON.stringify(current) && current.width > 0) return current
+            previous = current
+          }
+          await sleep(200)
         }
-        return null
+        return previous
       }
 
       await setDoc(`${TABLE}\n\n尾行`)
@@ -416,12 +439,17 @@ async function main() {
         const mathState = () => evaluate(renderer, `(() => ({
           widget: !!document.querySelector('.cm-md-math-inline'),
           head: ${VIEW}.state.selection.main.head,
-          len: ${VIEW}.state.doc.length
+          len: ${VIEW}.state.doc.length,
+          active: document.activeElement ? (document.activeElement.className || document.activeElement.tagName).toString().slice(0, 50) : '',
+          overlay: !!document.querySelector('.math-modal-overlay'),
+          menu: !!document.querySelector('.colamd-menu'),
+          cmFocus: ${VIEW}.hasFocus,
+          text: document.querySelector('.cm-content').textContent.slice(0, 30)
         }))()`)
         await clickMath(g.left + g.width * 0.8)
         const s1 = await mathState()
         check('第一次点行内公式：源码显形（widget 消失）', s1.widget === false, JSON.stringify(s1))
-        check('第一次点行内公式：光标落进区间（右侧）', s1.head >= 8 && s1.head <= 10, `head=${s1.head}`)
+        check('第一次点行内公式：光标落进区间（右侧）', s1.head >= 8 && s1.head <= 10, `head=${s1.head} geom=${JSON.stringify(g)}`)
         await setCursor(13)
         await sleep(350)
         const s2 = await mathState()
