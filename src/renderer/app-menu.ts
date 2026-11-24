@@ -19,6 +19,7 @@
 // src/shared/commands.ts，与偏好设置里的改绑同步。
 
 import { EDITOR_COMMANDS } from '../shared/commands'
+import { commandKeyLabel } from './editor/keymap-config'
 import { isChinese } from './ui-language'
 
 export type MenuModule = 'file' | 'format' | 'insert' | 'view' | 'more'
@@ -76,17 +77,16 @@ const THEME_LABELS: [string, string, string][] = [
   ['solarized-dark', '夜航', 'Solarized Dark'], ['nord', '极地', 'Nord'], ['dracula', '德古拉', 'Dracula'],
 ]
 
-/** `CmdOrCtrl+Shift+X` → `Ctrl+Shift+X`（这排按钮只在 Windows 上出现）。 */
-function displayAccelerator(accelerator: string): string | undefined {
-  return accelerator ? accelerator.replace(/^CmdOrCtrl/, 'Ctrl') : undefined
-}
-
-/** 注册表里的格式命令：名称与快捷键提示跟着用户的改绑走。 */
+/** 注册表里的格式命令：名称跟着注册表，快捷键提示跟着用户此刻的改绑走。
+ *
+ * 提示读的是按键层正在用的那张表（keymap-config 的 commandKeyLabel），不是注册表里的
+ * 默认键位。2026-11-24 用户把加粗改绑成 Alt+B 之后，这里还写着 Ctrl+B：照着提示按
+ * 没反应，点菜单项才有效（「设置内快捷键和菜单栏快捷键不同步」）。 */
 function command(id: string, zh: boolean): MenuItem {
   const spec = EDITOR_COMMANDS.find((entry) => entry.id === id)
   return {
     label: spec ? (zh ? spec.zh : spec.en) : id,
-    hint: spec ? displayAccelerator(spec.accelerator) : undefined,
+    hint: commandKeyLabel(id),
     channel: 'editor:format',
     args: [id],
   }

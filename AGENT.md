@@ -126,5 +126,6 @@ src/
   - `npm run verify:themes`：主题 CSS 的每条规则都要命中真实元素并改变计算样式
   - `npm run check:theme-colors`：12 套内置主题与独立主题文件的变量契约
   - `npm run verify:links`、`npm run verify:image-export`、`npm run verify:export-pdf`：链接跳转与两种导出的真机验证
+  - ColaMD CT 补的九条，**一条一条跑、不要并行**（每条启动时都会清掉别的验收实例；公共脚手架在 `scripts/ct-harness.mjs`）：`npm run verify:syntax`（全语法渲染，198 条）、`npm run verify:reveal-search`（光标处披露标记、查找照进表格）、`npm run verify:table-ops`（表格行列操作与键盘流）、`npm run verify:commands`（格式命令的菜单 / 快捷键 / 改绑入口）、`npm run verify:table-cells`（格子就地编辑不丢格式、单元格行内渲染）、`npm run verify:image-menu`（图片右键：菜单请求、缩放写回源码）、`npm run verify:keybindings`（改绑捕获、菜单提示同步、Alt 键位）、`npm run verify:outline`（带高块的长文，大纲高亮跟着滚动走）、`npm run verify:math-click`（点公式落光标，左右各 24 轮不许偏）
   - 四份类型检查：`npx tsc -p tsconfig.main.json --noEmit`，`preload` / `renderer` / `web` 同理
 - 已知缺口（2026-10-06）：块级渲染块（表格 / 图片 / 公式）的「点一下把光标放进源码」只断言了「排版不被翻成源码」，没断言光标真的落进那块源码里。要补就得读文档源码找落点（比如表格那行结尾必须变成 `|Z`），不能只断言「文档变了」。mermaid 没进这一批：它在 `verify:features` 的夹具里走到这一步就查不到了（等 15 秒也不回来），单独开窗实测导出前后都正常，是测试自身的问题，未查明。同一批还欠：`verify:image-export` 的 long/mobile 两档、`verify:export-pdf` 从未跑通。

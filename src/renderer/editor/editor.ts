@@ -17,8 +17,10 @@ import { selectionHTMLFrom } from './clean-html'
 import { renderWholeDocument, restoreViewport } from '../print-layout'
 
 import { headingFlashEffect, setCleanExport as setCleanExportEffect, setDocumentFileUrlEffect, primeDocumentFileUrl } from './live-preview'
-import { beginCellEdit, openTableContextMenu, parseTableModel } from './table-ops'
-import { showImageInfoCard } from './image-info'
+import { beginCellEdit, commitCellEdit, openTableContextMenu, parseTableModel } from './table-ops'
+import { applyImageMenuAction, setImageMenuSink, showImageContextMenu, showImageInfoCard } from './image-info'
+import { cellAtomDocRange } from './cell-inline'
+import type { ImageMenuRequest } from '../../shared/image-syntax'
 import { runFormatCommand as runFormat, type FormatCommandId } from './format-commands'
 import { isChinese } from '../ui-language'
 import { headingAnchorLine } from './heading-anchor'
@@ -268,6 +270,35 @@ function installEditorInteractions(root: HTMLElement, view: EditorView): void {
     })
   })
 
+  // ColaMD CT（2026-11-24）：点公式，在 mousedown 这一步就把光标按横向比例放好。
+  //
+  // 以前只在 click 里做，可是 mousedown 的默认行为会先把浏览器的原生光标放到公式的某一侧，
+  // CodeMirror 一同步选区，公式当场退回源码；按下位置的元素随之从 DOM 里消失，浏览器就不再
+  // 派发 click（按下和松开的目标不是同一个节点）——「按比例落位」根本没机会跑，光标停在区间
+  // 起点。实测是时序竞争：同一份代码 24 轮里会失败好几轮（v2.7.22 上不容易撞到，之后撞到的
+  // 概率明显变高）。现在在捕获阶段拦下 mousedown（原生光标不动），当场算好落点把光标放进去。
+  // 表格格子里的公式走下面的单元格编辑；图上的缩放控件是控件自己的地盘。
+  root.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.defaultPrevented) return
+    const hit = e.target as HTMLElement
+    if (hit.closest('.cm-md-table-widget') || hit.closest('.pele-zoom')) return
+    const widget = hit.closest('.cm-md-math') as HTMLElement | null
+    if (!widget) return
+    const from = Number(widget.dataset.sourceFrom)
+    const to = Number(widget.dataset.sourceTo)
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return
+    e.preventDefault()
+    e.stopPropagation()
+    const rect = widget.getBoundingClientRect()
+    let anchor = from
+    if (rect.width > 0) {
+      const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+      anchor = Math.min(to, from + Math.round(frac * (to - from)))
+    }
+    view.dispatch({ selection: { anchor }, scrollIntoView: true })
+    view.focus()
+  }, true)
+
   // 表格：点到的格子**就地编辑**（ColaMD CT，见 table-ops 的渲染态单元格编辑）。
   //
   // 历史包袱先说明：这里必须挂 mousedown 并在**捕获阶段**拦下，否则 CM6 先把光标
@@ -299,6 +330,39 @@ function installEditorInteractions(root: HTMLElement, view: EditorView): void {
     view.dispatch({ selection: { anchor }, scrollIntoView: true })
     view.focus()
   }, true)
+
+  // ColaMD CT：图片右键 → 原生菜单（放大 / 缩小 / 恢复 / 复制 / 打开 / 定位 / 编辑地址）。
+  // 正文里的图片和表格格子里的图片都认。必须排在下面表格的右键处理器**前面**注册：
+  // 同一个元素上先注册的先跑，这里拦下了（stopImmediatePropagation），表格菜单才不会跟着弹。
+  root.addEventListener('contextmenu', (e) => {
+    const target = e.target as HTMLElement
+    const img = target.closest('img')
+    if (!img) return
+    const wrap = img.closest<HTMLElement>('.cm-md-image')
+    if (wrap && wrap.dataset.sourceFrom !== undefined) {
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      showImageContextMenu(view, { from: Number(wrap.dataset.sourceFrom), to: Number(wrap.dataset.sourceTo), img, wrap })
+      return
+    }
+    const cell = img.closest<HTMLElement>('th, td')
+    if (!cell || !tableWidgetOf(img)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+    // 这一格正在就地编辑：先结算。文本有变的话表格会重建，这次就不出菜单（再右键一次即可）
+    if (cell.getAttribute('contenteditable') !== null) {
+      const before = view.state.doc
+      commitCellEdit(null)
+      if (view.state.doc !== before) return
+    }
+    const range = cellAtomDocRange(cell, img)
+    if (range) showImageContextMenu(view, { ...range, img })
+  })
+  // 供验收脚本用：原生菜单在离屏窗口里没法点，这里能把「右键会发什么」接走、直接执行菜单动作
+  window.__colamdImageMenu = {
+    intercept: (sink: ((request: ImageMenuRequest) => void) | null) => setImageMenuSink(sink),
+    run: (action: string, from: number, to: number) => applyImageMenuAction(view, from, to, action),
+  }
 
   // ColaMD CT：表格右键 → 原生上下文菜单（加删行列/对齐/移动/删表）。
   // 只在渲染态的表格 widget 上拦；光标在表格里时块已退源码，右键走默认。

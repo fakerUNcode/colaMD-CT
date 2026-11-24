@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, shell, session, clipboard, screen, nativeTheme } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu, shell, session, clipboard, screen, nativeTheme, nativeImage, net, ClipboardItem } from 'electron'
 import { execFile } from 'child_process'
 import { autoUpdater } from 'electron-updater'
 import { join, basename, dirname, extname, isAbsolute, resolve, relative, sep } from 'path'
@@ -9,6 +9,7 @@ import { resolveMarkdownLink } from './markdown-link'
 import { getSettings, updateSettings, getMergedAccelerators, type SettingsPatch } from './settings'
 import { ingestImage, pickImageFiles } from './image-upload'
 import { EDITOR_COMMANDS } from '../shared/commands'
+import type { ImageMenuRequest } from '../shared/image-syntax'
 
 const startupStartedAt = performance.now()
 const startupTraceEnabled = process.env.COLAMD_STARTUP_TRACE === '1'
@@ -2713,6 +2714,124 @@ ipcMain.handle('table-context-menu', (event, payload: {
     },
     { type: 'separator' },
     { ...action('deleteTable'), label: L.deleteTable },
+  ])
+  menu.popup({ window: win })
+})
+
+/** 把一个图片地址读成可以进剪贴板的位图（本地文件 / 网络图片 / data URL）。读不了返回 null。 */
+async function imageForClipboard(src: string): Promise<Electron.NativeImage | null> {
+  try {
+    if (src.startsWith('file:')) {
+      const path = fileURLToPath(src)
+      if (/\.svg$/i.test(path)) {
+        const data = await readFile(path)
+        return nativeImage.createFromDataURL(`data:image/svg+xml;base64,${data.toString('base64')}`)
+      }
+      return nativeImage.createFromPath(path)
+    }
+    if (/^https?:/i.test(src)) {
+      const response = await net.fetch(src)
+      if (!response.ok) return null
+      const type = response.headers.get('content-type') ?? 'application/octet-stream'
+      const buffer = Buffer.from(await response.arrayBuffer())
+      if (/svg/i.test(type)) return nativeImage.createFromDataURL(`data:${type};base64,${buffer.toString('base64')}`)
+      return nativeImage.createFromBuffer(buffer)
+    }
+    if (/^data:/i.test(src)) return nativeImage.createFromDataURL(src)
+    return null
+  } catch {
+    return null
+  }
+}
+
+// ColaMD CT：图片右键。原生菜单（与表格右键同一模式）。
+// 复制 / 打开 / 在文件夹中显示 / 另存不碰文档，在主进程直接做；缩放、编辑地址、图片信息
+// 经 image-menu-action 发回渲染端（image-info.ts 执行）。
+ipcMain.handle('image-context-menu', (event, payload: ImageMenuRequest) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || !payload || typeof payload !== 'object') return
+  const zh = getPreferredLanguage() === 'zh'
+  const L = zh
+    ? {
+      zoomIn: '放大', zoomOut: '缩小', actualSize: '恢复原始大小',
+      copyImage: '复制图片', copyPath: '复制图片地址', open: '打开图片', reveal: '在资源管理器中显示',
+      saveAs: '图片另存为…', editSource: '编辑地址', info: '图片信息',
+      copyFailed: '复制失败', copyFailedDetail: '这张图片读不出来，没法复制到剪贴板。', saveFailed: '另存失败',
+    }
+    : {
+      zoomIn: 'Zoom In', zoomOut: 'Zoom Out', actualSize: 'Actual Size',
+      copyImage: 'Copy Image', copyPath: 'Copy Image Address', open: 'Open Image', reveal: 'Reveal in File Manager',
+      saveAs: 'Save Image As…', editSource: 'Edit source', info: 'Image Info',
+      copyFailed: 'Could not copy', copyFailedDetail: 'The image could not be read.', saveFailed: 'Could not save',
+    }
+  const localPath = (src: string): string | null => {
+    try {
+      return src.startsWith('file:') ? fileURLToPath(src) : null
+    } catch {
+      return null
+    }
+  }
+  const warn = (message: string, detail: string): void => {
+    if (!win.isDestroyed()) void dialog.showMessageBox(win, { type: 'warning', message, detail })
+  }
+  const send = (action: string) => (): void => {
+    if (!win.isDestroyed()) win.webContents.send('image-menu-action', { action, from: payload.from, to: payload.to })
+  }
+  const copyImage = (): void => {
+    // 这个 Electron 版本的剪贴板是 Web 式接口：clipboard.write([new ClipboardItem({ MIME: Blob })])
+    // （旧的 writeImage 已经没有了，实测 typeof === 'undefined'）
+    void imageForClipboard(payload.src).then(async (image) => {
+      if (!image || image.isEmpty()) {
+        warn(L.copyFailed, L.copyFailedDetail)
+        return
+      }
+      // 拷一份再交给 Blob：Node 的 Buffer 可能落在共享池上，类型与 Blob 要的不一致
+      await clipboard.write([new ClipboardItem({ 'image/png': new Blob([Uint8Array.from(image.toPNG())], { type: 'image/png' }) })])
+    }).catch(() => warn(L.copyFailed, L.copyFailedDetail))
+  }
+  const openImage = (): void => {
+    const path = localPath(payload.src)
+    if (path) void shell.openPath(path)
+    else if (/^https?:/i.test(payload.src)) void shell.openExternal(payload.src)
+  }
+  const saveAs = (): void => {
+    const path = localPath(payload.src)
+    const remoteName = payload.src.split('/').pop()?.split(/[?#]/)[0] ?? ''
+    const suggested = path ? basename(path) : (remoteName || 'image')
+    void dialog.showSaveDialog(win, { defaultPath: join(app.getPath('downloads'), suggested) }).then(async ({ canceled, filePath }) => {
+      if (canceled || !filePath) return
+      try {
+        if (path) await copyFile(path, filePath)
+        else {
+          const response = await net.fetch(payload.src)
+          if (!response.ok) throw new Error(`HTTP ${response.status}`)
+          await writeFile(filePath, Buffer.from(await response.arrayBuffer()))
+        }
+      } catch {
+        warn(L.saveFailed, filePath)
+      }
+    })
+  }
+  const menu = Menu.buildFromTemplate([
+    { label: L.zoomIn, enabled: payload.canZoomIn === true, click: send('zoomIn') },
+    { label: L.zoomOut, enabled: payload.canZoomOut === true, click: send('zoomOut') },
+    { label: L.actualSize, enabled: payload.canActualSize === true, click: send('actualSize') },
+    { type: 'separator' },
+    { label: L.copyImage, click: copyImage },
+    { label: L.copyPath, click: () => { void clipboard.writeText(payload.rawSrc) } },
+    { type: 'separator' },
+    { label: L.open, click: openImage },
+    ...(payload.local ? [{
+      label: L.reveal,
+      click: () => {
+        const path = localPath(payload.src)
+        if (path) shell.showItemInFolder(path)
+      },
+    }] : []),
+    { label: L.saveAs, click: saveAs },
+    { type: 'separator' },
+    { label: L.editSource, click: send('editSource') },
+    ...(payload.hasInfoCard ? [{ label: L.info, click: send('imageInfo') }] : []),
   ])
   menu.popup({ window: win })
 })

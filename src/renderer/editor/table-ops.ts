@@ -16,6 +16,7 @@
 import { keymap, type EditorView } from '@codemirror/view'
 import { syntaxTree } from '@codemirror/language'
 import { Prec, type EditorState } from '@codemirror/state'
+import { commitCellSource } from './cell-inline'
 
 export type ColumnAlign = 'left' | 'center' | 'right' | 'default'
 
@@ -506,9 +507,14 @@ function onCellBlur(this: HTMLTableCellElement): void {
 }
 
 /**
- * 结算当前格子：文本有变化就把整张表序列化写回缓冲区（光标落在表外，表格
- * 保持渲染）。next 非空时聚焦下一格——有事务就等重建（pendingCellFocus），
- * 没事务直接在现有 DOM 上聚焦。
+ * 结算当前格子：有改动就把整张表序列化写回缓冲区（光标落在表外，表格保持渲染）。
+ * next 非空时聚焦下一格——有事务就等重建（pendingCellFocus），没事务直接在现有 DOM 上聚焦。
+ *
+ * 改动怎么算（2026-11-24 修重大 bug）：以前直接拿格子的 textContent 当新内容，可那是
+ * **渲染后**的文字——`**加粗**` 在 DOM 里是 `<strong>加粗</strong>`，textContent 只剩
+ * `加粗`。于是点进任何带格式的格子再点走，格式标记就被冲掉，而且写进了文件。现在由
+ * cell-inline 的 commitCellSource 按「显示文字 ↔ 源码」的映射把改动落回去：没改一个字
+ * 就返回 null（源码不动），改了也只动改动的那几个字，标记原样保留。
  */
 export function commitCellEdit(next: { row: number; col: number } | null): void {
   const edit = cellEdit
@@ -516,10 +522,11 @@ export function commitCellEdit(next: { row: number; col: number } | null): void 
   cellEdit = null
   edit.td.removeAttribute('contenteditable')
   edit.td.classList.remove('cm-md-cell-editing')
-  const text = (edit.td.textContent ?? '').trim()
   const model = parseTableModel(edit.view.state.doc.sliceString(edit.from, edit.to))
   if (model && model.rows[edit.row]) {
-    if (model.rows[edit.row][edit.col] !== text) {
+    const before = model.rows[edit.row][edit.col]
+    const text = commitCellSource(edit.td, before)
+    if (text !== null && text !== before) {
       model.rows[edit.row][edit.col] = text
       if (next) pendingCellFocus = { view: edit.view, row: next.row, col: next.col }
       applyModel(edit.view, { from: edit.from, to: edit.to }, model, edit.row, edit.col)

@@ -1731,8 +1731,17 @@ body.presenting #editor .cm-content svg {
 
 .colamd-image-info-footer {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 8px;
+}
+
+/* 「右键图片可缩放」：缩放只挂在右键菜单上，没有这句话没人找得到 */
+.colamd-image-info-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .colamd-image-info-footer .math-modal-btn {

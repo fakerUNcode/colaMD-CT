@@ -96,9 +96,10 @@ export function isValidAccelerator(accelerator: string): boolean {
  * 字符串之后对一下这个形式，就等于在对「同一个键」）。
  *
  * CmdOrCtrl/Cmd/Command/Ctrl → ctrl；KeyIn→KeyIn；字符转成小写；+ 号统一。
+ * 修饰键与键之间才切分（`Ctrl++` 的最后那个 + 是加号键本身，不是分隔符）。
  */
 export function normalizeAccelerator(accelerator: string): string {
-  const parts = accelerator.split('+').map((part) => part.trim()).filter(Boolean)
+  const parts = accelerator.split(/\+(?=.)/).map((part) => part.trim()).filter(Boolean)
   const mods = new Set<string>()
   let key = ''
   for (const part of parts) {
@@ -110,4 +111,106 @@ export function normalizeAccelerator(accelerator: string): string {
     else if (!key) key = lower
   }
   return [...mods].sort().join('+') + (key ? (mods.size ? '+' : '') + key : '')
+}
+
+/**
+ * 符号键 → 物理键（美式键盘）。改绑捕获存的本来就是物理键形式；但手写进
+ * settings.json 的加速键可能是按字符写的（`Ctrl+Shift+^`、`Ctrl+Shift+Backquote`），
+ * 归一到物理键之后才和键盘事件的规范形式对得上。
+ */
+export const PHYSICAL_KEY: Record<string, string> = {
+  '+': '=', plus: '=', '~': '`', backquote: '`',
+  '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
+  '_': '-', minus: '-', equal: '=', '{': '[', '}': ']', '|': '\\', ':': ';', '"': "'",
+  '<': ',', '>': '.', '?': '/', space: 'space',
+}
+
+/**
+ * accelerator → 按键匹配用的规范形式（修饰键归一 + 键归一到物理键）。
+ * 改绑捕获存下来的、手写进 settings.json 的、键盘事件折出来的，三方都归到这一个形式再比。
+ */
+export function canonicalKey(accelerator: string): string {
+  const parts = normalizeAccelerator(accelerator).split('+')
+  const key = parts.pop() ?? ''
+  return [...parts, PHYSICAL_KEY[key] ?? key].join('+')
+}
+
+const MODIFIER_ORDER = [ 'Ctrl', 'Cmd', 'Alt', 'Shift', 'Meta' ]
+
+/**
+ * accelerator 写给人看的形式。偏好设置的改绑列表、标题栏模块菜单、冲突提示共用它，
+ * 三处看到的永远是同一个写法（2026-11-24 用户报「设置内快捷键和菜单栏不同步」：
+ * 设置页写 `CmdOrCtrl+B`、菜单写 `Ctrl+B`，同一组键看着像两组）。
+ *
+ * Windows / Linux 上 CmdOrCtrl 写作 Ctrl，macOS 写作 Cmd；修饰键顺序固定为
+ * Ctrl、Alt、Shift（手写的 `Shift+Alt+C` 也显示成 `Alt+Shift+C`）。
+ */
+export function displayAccelerator(accelerator: string, darwin = false): string {
+  const ctrl = darwin ? 'Cmd' : 'Ctrl'
+  const parts = accelerator.split(/\+(?=.)/).map((part) => part.trim()).filter(Boolean)
+  const mods: string[] = []
+  let key = ''
+  for (const part of parts) {
+    const lower = part.toLowerCase()
+    const mod = lower === 'cmdorctrl' || lower === 'ctrl' || lower === 'command' || lower === 'cmd' ? ctrl
+      : lower === 'alt' || lower === 'option' || lower === 'altgr' ? 'Alt'
+      : lower === 'shift' ? 'Shift'
+      : lower === 'meta' || lower === 'super' ? 'Meta'
+      : null
+    if (mod) {
+      if (!mods.includes(mod)) mods.push(mod)
+    } else if (!key) key = /^[a-z]$/i.test(part) ? part.toUpperCase() : part
+  }
+  mods.sort((a, b) => MODIFIER_ORDER.indexOf(a) - MODIFIER_ORDER.indexOf(b))
+  return [...mods, key].filter(Boolean).join('+')
+}
+
+/** 按键事件里按键层的接口（KeyboardEvent 的一个子集，验收脚本里也能拼出来）。 */
+export interface KeyLike {
+  ctrlKey: boolean
+  metaKey: boolean
+  altKey: boolean
+  shiftKey: boolean
+  code: string
+  key: string
+}
+
+/**
+ * 键盘事件的物理键名：优先 event.code（布局无关），认不出再退 event.key。
+ * 返回的是**物理键**（`6`、`` ` ``、`-`），不是打出来的字符（`^`、`~`、`_`）。
+ */
+export function physicalKeyOf(event: KeyLike): string | null {
+  const code = event.code
+  if (!code) return event.key.length === 1 ? event.key.toLowerCase() : null
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase()
+  if (/^Digit\d$/.test(code)) return code.slice(5)
+  const named: Record<string, string> = {
+    Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
+    Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: "'",
+    Space: 'space',
+  }
+  if (code in named) return named[code]
+  if (/^F\d{1,2}$/.test(code)) return code.toLowerCase()
+  return event.key.length === 1 ? event.key.toLowerCase() : null
+}
+
+/**
+ * 一次按键 → accelerator（物理键形式，`CmdOrCtrl+Shift+6`），改绑捕获用。
+ * 没有 Ctrl/Cmd 或 Alt 修饰、或者认不出键位时返回 null。
+ *
+ * 修饰键必须拼进去（2026-11-24 实测：v2.7.22 归一物理键时把这一步改丢了，
+ * 捕获函数只返回键名，于是按任何组合都被判成「需含 Ctrl/Cmd 或 Alt 修饰」，
+ * 偏好设置里的改绑整条路是坏的）。
+ */
+export function acceleratorFromEvent(event: KeyLike): string | null {
+  const hasCtrl = event.ctrlKey || event.metaKey
+  const hasAlt = event.altKey
+  if (!hasCtrl && !hasAlt) return null
+  const key = physicalKeyOf(event)
+  if (!key) return null
+  const mods: string[] = []
+  if (hasCtrl) mods.push('CmdOrCtrl')
+  if (hasAlt) mods.push('Alt')
+  if (event.shiftKey) mods.push('Shift')
+  return [...mods, /^[a-z]$/.test(key) ? key.toUpperCase() : key].join('+')
 }

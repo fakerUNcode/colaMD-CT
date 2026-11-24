@@ -7,7 +7,10 @@
 //   显式保存：图床凭据与快捷键改绑（敲到一半不能半截生效），底部 保存/取消。
 // 骨架沿用编辑器字体弹窗（font-settings.ts）的 math-modal 体系，配色全部走主题变量。
 
-import { EDITOR_COMMANDS, isValidAccelerator, type EditorCommandSpec } from '../shared/commands'
+import {
+  EDITOR_COMMANDS, acceleratorFromEvent, canonicalKey, displayAccelerator, isValidAccelerator, mergeAccelerators,
+  type EditorCommandSpec,
+} from '../shared/commands'
 import type { AppSettings, ImageSettings, MarkdownDialectSettings, TableSettings } from '../shared/settings-types'
 import { applyKeybindings } from './editor/keymap-config'
 import { isChinese } from './ui-language'
@@ -361,6 +364,8 @@ export async function showPreferences(): Promise<void> {
 
     const bindingButtons = new Map<string, HTMLButtonElement>()
     let capturingId: string | null = null
+    /** 「需含修饰键」提示的复原计时器。 */
+    let captureHintTimer: ReturnType<typeof setTimeout> | null = null
 
     const effective = (): Record<string, string> => {
       const merged: Record<string, string> = {}
@@ -368,36 +373,24 @@ export async function showPreferences(): Promise<void> {
       for (const [id, value] of overrides) if (value !== undefined) merged[id] = value
       return merged
     }
+    // 写给人看的写法与标题栏模块菜单同源（displayAccelerator）：两处看到的永远是同一个键
     const displayOf = (command: EditorCommandSpec): string => {
       const value = overrides.has(command.id) ? overrides.get(command.id) as string : command.accelerator
-      return value === '' ? t.unbound : value
+      return value === '' ? t.unbound : displayAccelerator(value)
     }
     const markConflicts = (): void => {
       const current = effective()
       const seen = new Map<string, number>()
       for (const value of Object.values(current)) {
         if (!value) continue
-        seen.set(value, (seen.get(value) ?? 0) + 1)
+        // 按归一后的键比（`Shift+Alt+C` 与 `Alt+Shift+C`、`Ctrl+Shift+^` 与 `Ctrl+Shift+6` 是同一个键）
+        const key = canonicalKey(value)
+        seen.set(key, (seen.get(key) ?? 0) + 1)
       }
       for (const [id, button] of bindingButtons) {
-        button.classList.toggle('conflict', !!current[id] && (seen.get(current[id]) ?? 0) > 1)
+        button.classList.toggle('conflict', !!current[id] && (seen.get(canonicalKey(current[id])) ?? 0) > 1)
         button.classList.toggle('capturing', capturingId === id)
       }
-    }
-    const acceleratorFromEvent = (event: KeyboardEvent): string | null => {
-      const hasCtrl = event.ctrlKey || event.metaKey
-      const hasAlt = event.altKey
-      if (!hasCtrl && !hasAlt) return null
-      const code = event.code
-      if (/^Key[A-Z]$/.test(code)) return code.slice(3)
-      if (/^Digit\d$/.test(code)) return code.slice(5)
-      const named: Record<string, string> = {
-        Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
-        Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: "'",
-      }
-      if (code in named) return named[code]
-      if (/^F\d{1,2}$/.test(code)) return code
-      return event.key.length === 1 ? event.key : null
     }
 
     const renderKeys = (): void => {
@@ -459,9 +452,23 @@ export async function showPreferences(): Promise<void> {
         event.stopPropagation()
         overrides.set(id, '')
       } else {
+        // 完整的组合键（修饰键 + 物理键），与按键层匹配用的形式同源（shared/commands）
         const accelerator = acceleratorFromEvent(event)
         if (!accelerator || !isValidAccelerator(accelerator)) {
-          if (button) button.textContent = zh ? '需含 Ctrl/Cmd 或 Alt 修饰' : 'Needs Ctrl/Cmd or Alt'
+          event.preventDefault()
+          event.stopPropagation()
+          // 这次没按对：提示一下，继续等下一个组合。以前这里直接结束捕获，按钮上就一直
+          // 留着那句提示，原来的键位也看不见了。
+          capturingId = id
+          if (button) {
+            button.textContent = zh ? '需含 Ctrl/Cmd 或 Alt 修饰' : 'Needs Ctrl/Cmd or Alt'
+            if (captureHintTimer) clearTimeout(captureHintTimer)
+            captureHintTimer = setTimeout(() => {
+              captureHintTimer = null
+              if (capturingId === id && button.isConnected) button.textContent = zh ? '按下新组合…' : 'Press keys…'
+            }, 1200)
+          }
+          markConflicts()
           return
         }
         event.preventDefault()
@@ -518,7 +525,8 @@ export async function showPreferences(): Promise<void> {
     }
     overlay.remove()
     void window.electronAPI?.updateSettings({ image, keybindings }).then((next) => {
-      applyKeybindings(mergedOf(next))
+      // 与按键层的启动路径同一个合并函数（带合法性校验），主进程重搭原生菜单用的也是这一份
+      applyKeybindings(mergeAccelerators(next.keybindings))
     })
   })
   footerRight.append(cancel, save)
@@ -532,16 +540,4 @@ export async function showPreferences(): Promise<void> {
   modal.append(header, layout, footer)
   overlay.appendChild(modal)
   document.body.appendChild(overlay)
-}
-
-function mergedOf(settings: AppSettings | undefined | void): Record<string, string> {
-  const merged: Record<string, string> = {}
-  for (const command of EDITOR_COMMANDS) merged[command.id] = command.accelerator
-  const overrides = settings?.keybindings
-  if (overrides) {
-    for (const [id, value] of Object.entries(overrides)) {
-      if (typeof value === 'string') merged[id] = value
-    }
-  }
-  return merged
 }

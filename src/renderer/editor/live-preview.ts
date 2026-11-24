@@ -25,11 +25,15 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, typ
 import { EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from '@codemirror/state'
 import { forceParsing, syntaxTree } from '@codemirror/language'
 import type { SyntaxNode, SyntaxNodeRef } from '@lezer/common'
-import katex from 'katex'
 import { scanMath, excludedRanges, frontmatterRange, type Excluded, type MathRange } from './math-scan'
 import { renderMermaid, attachDiagramZoom, detachDiagramZoom, isDiagramZoomed } from './mermaid-bridge'
 import { searchStateField } from './search-highlight'
 import { sanitizeHTML, cleanStyle } from './html-sanitize'
+import {
+  renderCell, mathElement, decodeEntity, resolveImageSrc, parseHtmlTag, HTML_SEMANTIC, HTML_VOID, noteCellOffset,
+  type CellSearchSpan,
+} from './cell-inline'
+import { IMG_TAG_RE, imgAttr } from '../../shared/image-syntax'
 import { footnoteDefinitions, footnoteNumbers, FOOTNOTE_REF_RE } from './footnotes'
 import { isChinese } from '../ui-language'
 import { attachColumnResize, applyPendingCellFocus } from './table-ops'
@@ -161,20 +165,6 @@ class TextWidget extends WidgetType {
     span.textContent = this.text
     return span
   }
-}
-
-/**
- * HTML 实体 → 字符（`&amp;` → `&`，`&#65;` → `A`）。
- *
- * 借浏览器自己的实体表：塞进 textarea 的 innerHTML 再读 value。解不出来
- * （`&nope;` 这种不存在的实体）读回的还是原文，按 CommonMark 规范保持字面。
- */
-function decodeEntity(raw: string): string | null {
-  if (typeof document === 'undefined') return null
-  const decoder = document.createElement('textarea')
-  decoder.innerHTML = raw
-  const value = decoder.value
-  return value === raw || value === '' ? null : value
 }
 
 /**
@@ -329,18 +319,6 @@ export const documentFileUrlField = StateField.define<string | null>({
   },
 })
 
-/** 把文件里的图片地址解析成浏览器能加载的地址。 */
-function resolveImageSrc(raw: string, base: string | null): string {
-  const value = raw.trim().replace(/^<|>$/g, '')
-  if (/^(?:https?:|file:|data:|blob:)/i.test(value)) return value
-  if (!base) return value
-  try {
-    return new URL(value.replaceAll('\\', '/'), base).href
-  } catch {
-    return value
-  }
-}
-
 /** `![alt](src)` / `![alt](<src> "title")`。解析不了就返回 null，退回源码。 */
 function parseImage(source: string): { alt: string; src: string } | null {
   const match = /^!\[([^\]]*)\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)$/.exec(source.trim())
@@ -374,21 +352,27 @@ class ImageWidget extends WidgetType {
     readonly source: string,
     readonly from: number,
     readonly to: number,
+    /** `<img width>` 里的显式宽度（像素）；0 = 按图片自身大小。 */
+    readonly width = 0,
+    /** 源码是 `<img>` 标签（缩放过的图片），不是 `![]()`。 */
+    readonly html = false,
   ) {
     super()
   }
 
   eq(other: ImageWidget): boolean {
     return other.src === this.src && other.alt === this.alt && other.from === this.from && other.to === this.to
+      && other.width === this.width && other.html === this.html
   }
 
   toDOM(): HTMLElement {
     const wrap = document.createElement('span')
-    wrap.className = 'cm-md-image'
+    wrap.className = this.html ? 'cm-md-image cm-md-image-html' : 'cm-md-image'
     withSourceRange(wrap, this.from, this.to)
     const img = document.createElement('img')
     img.src = this.src
     img.alt = this.alt
+    if (this.width > 0) img.setAttribute('width', String(this.width))
     img.addEventListener('load', () => {
       remeasureAfterDraw()
     })
@@ -635,31 +619,6 @@ function isBlockActive(state: EditorState, from: number, to: number): boolean {
 }
 
 // ─── 公式 ────────────────────────────────────────────────────────────────────
-
-/**
- * 画一个公式。
- *
- * 两个调用点：正文里的 MathWidget，和表格单元格里的行内公式。表格是整块替换渲染的，
- * 格子里的文字挂不上 CodeMirror 的装饰层，只能在拼 DOM 的时候自己画。
- *
- * 渲染失败时把源码原样放回去（`cm-md-math-error`），宁可难看也不丢字。
- */
-function mathElement(code: string, block: boolean): HTMLElement {
-  const el = document.createElement(block ? 'div' : 'span')
-  el.className = block ? 'cm-md-math cm-md-math-block' : 'cm-md-math cm-md-math-inline'
-  try {
-    el.innerHTML = katex.renderToString(code, {
-      displayMode: block,
-      throwOnError: true,
-      // 公式里可能带用户写的 HTML，KaTeX 的 trust 默认关闭，保持关闭
-      trust: false,
-    })
-  } catch {
-    el.textContent = (block ? '$$' : '$') + code + (block ? '$$' : '$')
-    el.classList.add('cm-md-math-error')
-  }
-  return el
-}
 
 /**
  * 公式渲染。判定交给 math-scan.ts（照 Obsidian 的保守规则），这里只负责画。
@@ -1059,7 +1018,9 @@ class TableWidget extends WidgetType {
     head.forEach((cell, index) => {
       const th = document.createElement('th')
       th.style.textAlign = alignOf(rows[1]?.[index]?.text ?? '')
-      appendInline(th, cell.text, this.base, this.inlineMath, cellMarks(cell, this.from, this.marks))
+      // ColaMD CT：单元格的行内渲染与「显示文字 ↔ 源码」的映射都在 cell-inline.ts
+      renderCell(th, cell.text, this.base, this.inlineMath, this.looseEmphasis, cellMarks(cell, this.from, this.marks))
+      noteCellOffset(th, this.from + (cell.map[0] ?? 0))
       headRow.appendChild(th)
     })
     thead.appendChild(headRow)
@@ -1071,7 +1032,10 @@ class TableWidget extends WidgetType {
         const td = document.createElement('td')
         td.style.textAlign = alignOf(rows[1]?.[i]?.text ?? '')
         const cell = row[i]
-        if (cell) appendInline(td, cell.text, this.base, this.inlineMath, cellMarks(cell, this.from, this.marks))
+        if (cell) {
+          renderCell(td, cell.text, this.base, this.inlineMath, this.looseEmphasis, cellMarks(cell, this.from, this.marks))
+          noteCellOffset(td, this.from + (cell.map[0] ?? 0))
+        }
         tr.appendChild(td)
       }
       tbody.appendChild(tr)
@@ -1162,310 +1126,6 @@ function alignOf(delimiter: string): string {
   if (left && right) return 'center'
   if (right) return 'right'
   return 'left'
-}
-
-/**
- * 单元格里的行内内容。
- *
- * 用 DOM 拼，不拼 innerHTML：单元格内容来自用户的文件，拼字符串等于把文件里的
- * `<img onerror=...>` 直接执行掉。这里只认粗体、斜体、行内代码、删除线、链接、
- * 图片、行内公式和 `<br>`，认不出来的就当普通文字。
- *
- * `<br>` 与图片是 #138 补上的：Obsidian、Typora、GitHub 都把格子里的 `<br/>` 画成
- * 换行，把格子里的 `![](x.png)` 画成图片；2.6 也这样，换内核后这两样都退成了纯文字。
- * 行内 HTML 里只有 `<br>` 被认：它是最常跟表格一起用的一个，而其它标签（尤其是带
- * 事件或样式的）放进表格只会多一个要防的口子。
- *
- * 公式（#197）：判定照旧交给 math-scan.ts（和正文同一套规则），画由 mathElement
- * 负责，格子里的 `$x$` 要画成公式。`$$...$$` 在格子里也按行内画：表格的行高由
- * 单元格决定，一个块级公式会把整行撑开。
- *
- * 下划线强调要卡词边界（#161）。CommonMark 与 GFM 里 `_` 不能跨在词中间生效，
- * 所以 `local_upload / external_api` 是两个普通单词，`snake_case_name` 也一样；
- * 这里早期只写了 `_` 配对，会把中间那段吃掉变成斜体，连下划线本身也不见了。
- * `*` 不受这条限制（`a*b*c` 在 CommonMark 里确实是斜体），所以两个分支分开写。
- * 边界用 Unicode 字母与数字，中文也算词字符。
- *
- * ColaMD CT（2026-11-23 全语法审计）：单元格里的行内语法此前只有扁平的一层匹配，
- * 嵌套强调（`**粗 *斜* 粗**`）里层不渲染，高亮、转义、实体、行内 HTML、上下标、
- * 自动链接一概不认。现在是递归渲染，覆盖面与正文的装饰层对齐：
- *   - 容器类（粗/斜/删/高亮）把内层切片交给同一函数递归；
- *   - 反斜杠转义先于强调被吃掉，闭合定界符不许被转义；
- *   - 行内 HTML 的语义标签挂对应的 cm-md-html-* 类（见 collectHTML），带其它属性的
- *     整段交给消毒器；`<br>`、`<img>` 这类单标签消毒后直接画。
- */
-const INLINE_RE =
-  /`(?<code>[^`]+)`|\*\*(?<strong>.+?)(?<!\\)\*\*|(?<![A-Za-z0-9_])__(?<strongU>(?=\S).+?(?<=\S))(?<!\\)__(?![A-Za-z0-9_])|(?<!\*)\*(?<em>.+?)(?<!\\)\*(?!\*)|(?<![A-Za-z0-9_])_(?<emU>(?=\S).+?(?<=\S))(?<!\\)_(?![A-Za-z0-9_])|~~(?<strike>.+?)(?<!\\)~~|==(?<highlight>.+?)(?<!\\)==|!\[(?<alt>[^\]]*)\]\(\s*(?<src><[^>]*>|[^)\s]+)[^)]*\)|\[(?<linkText>[^\]]*)\]\((?<href>[^)]*)\)|<(?<autolink>[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>]+|[^\s<>@]+@[^\s<>@]+)>|\\(?<escape>[!-/:-@\[-`{-~])|&(?<entity>[a-zA-Z][a-zA-Z0-9]{1,31}|#\d{1,7}|#[xX][0-9a-fA-F]{1,6});|(?<htmlTag><\/?[a-zA-Z][^<>]*\/?>)|<br\s*\/?>/giud
-
-/** Unicode 词字符（含汉字）。严格方言下，下划线强调的两侧不许是它。 */
-const UNICODE_WORD_CHAR = /[\p{L}\p{N}_]/u
-
-/** 单元格里的行内代码区间：反引号里的 `$` 不是公式定界符。 */
-function codeSpanRanges(text: string): Excluded[] {
-  const out: Excluded[] = []
-  const re = /`[^`]+`/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(text)) !== null) out.push({ from: match.index, to: match.index + match[0].length })
-  return out
-}
-
-/**
- * 往单元格里写一段源码文字，其中的公式画成 KaTeX，查找匹配包成高亮 span。
- *
- * `from` / `to` 是这段文字在整格源码里的下标：强调、链接里的文字也可能带公式，
- * 所以按整格的下标取区间，而不是按切片的局部下标。
- */
-function appendCellText(
-  parent: HTMLElement,
-  text: string,
-  math: MathRange[],
-  from: number,
-  to: number,
-  marks: readonly SearchSpan[],
-): void {
-  let cursor = from
-  for (const range of math) {
-    // 只处理整段落在这一段里的公式；跨过边界的（`**$x**$` 这类）留着当普通文字
-    if (range.from < cursor || range.to > to) continue
-    if (range.from > cursor) appendText(parent, text, cursor, range.from, marks)
-    const el = mathElement(range.code, false)
-    // 画出来的公式里分不出源码的哪一段，只有整条公式都被匹配盖住才加高亮
-    const className = markClassCovering(marks, range.from, range.to)
-    if (className) el.classList.add(className)
-    parent.appendChild(el)
-    cursor = range.to
-  }
-  if (cursor < to) appendText(parent, text, cursor, to, marks)
-}
-
-/** 一处查找高亮。与正文里检索面板画的装饰同类名、同配色（base.css）。 */
-function searchMark(text: string, current: boolean): HTMLSpanElement {
-  const span = document.createElement('span')
-  span.className = current ? 'search-match-current' : 'search-match'
-  span.textContent = text
-  return span
-}
-
-/** 把 `text[from, to)` 写进 parent，落在这段里的查找匹配各包成一个高亮 span（越界的裁掉）。 */
-function appendText(parent: HTMLElement, text: string, from: number, to: number, marks: readonly SearchSpan[]): void {
-  let cursor = from
-  for (const mark of marks) {
-    if (mark.to <= cursor || mark.from >= to) continue
-    const start = Math.max(mark.from, cursor)
-    const end = Math.min(mark.to, to)
-    if (start > cursor) parent.appendChild(document.createTextNode(text.slice(cursor, start)))
-    parent.appendChild(searchMark(text.slice(start, end), mark.current))
-    cursor = end
-  }
-  if (cursor < to) parent.appendChild(document.createTextNode(text.slice(cursor, to)))
-}
-
-/**
- * `[from, to)` 这段源码被画成了一个不可拆的元素（公式、图片、实体解码后的字符）时
- * 该挂的高亮类名，不需要就是空串。只有某处匹配**盖住整段**才加：只盖住一半的话，
- * 画出来的东西里分不出哪一半，硬加就是假高亮。
- */
-function markClassCovering(marks: readonly SearchSpan[], from: number, to: number): string {
-  let className = ''
-  for (const mark of marks) {
-    if (mark.from <= from && mark.to >= to) {
-      if (mark.current) className = 'search-match-current'
-      else className ||= 'search-match'
-    }
-  }
-  return className
-}
-
-/** 写一段与源码不是逐字对应的文字（实体解码后的字符）；要高亮时包一层。 */
-function appendLiteral(parent: HTMLElement, value: string, className: string): void {
-  if (className) parent.appendChild(searchMark(value, className === 'search-match-current'))
-  else parent.appendChild(document.createTextNode(value))
-}
-
-function appendInline(
-  parent: HTMLElement,
-  text: string,
-  base: string | null,
-  inlineMath = true,
-  marks: readonly SearchSpan[] = [],
-): void {
-  // 公式先定出来，免得公式里的 `*`、`_` 被当成强调吃掉；方言关掉行内公式时按普通文字走
-  const math = inlineMath ? scanMath(text, codeSpanRanges(text)) : []
-  appendInlineRange(parent, text, base, math, marks)
-}
-
-/** 单元格里嵌套的行内 HTML 闭标签位置（同名标签按计数配对）。返回 null = 没配上。 */
-function cellCloseTag(text: string, from: number, name: string): { from: number; to: number } | null {
-  const re = new RegExp(`<(/?)\\s*${name}\\s*(/?)\\s*>`, 'gi')
-  re.lastIndex = from
-  let depth = 1
-  let match: RegExpExecArray | null
-  while ((match = re.exec(text)) !== null) {
-    const closing = match[1] === '/'
-    const selfClosing = match[2] === '/'
-    if (closing) {
-      depth--
-      if (depth === 0) return { from: match.index, to: match.index + match[0].length }
-    } else if (!selfClosing) {
-      depth++
-    }
-  }
-  return null
-}
-
-function appendInlineRange(
-  parent: HTMLElement,
-  text: string,
-  base: string | null,
-  math: MathRange[],
-  marks: readonly SearchSpan[],
-): void {
-  const write = (target: HTMLElement, from: number, to: number): void =>
-    appendCellText(target, text, math, from, to, marks)
-  // 容器的内层：切成子文本递归，公式范围与查找高亮换算到子文本坐标
-  const recurse = (target: HTMLElement, from: number, to: number): void => {
-    const subMath = math
-      .filter((range) => range.from >= from && range.to <= to)
-      .map((range) => ({ ...range, from: range.from - from, to: range.to - from }))
-    // 高亮裁到内层：匹配伸进定界符的那一截不显示，其余照常亮
-    const subMarks = marks
-      .filter((mark) => mark.from < to && mark.to > from)
-      .map((mark) => ({ ...mark, from: Math.max(mark.from, from) - from, to: Math.min(mark.to, to) - from }))
-    appendInlineRange(target, text.slice(from, to), base, subMath, subMarks)
-  }
-
-  INLINE_RE.lastIndex = 0
-  let last = 0
-  let match: RegExpExecArray | null
-  while ((match = INLINE_RE.exec(text)) !== null) {
-    // 落在公式里的标记只是公式的一部分：`$a*b*c$` 里的 `*b*` 不是斜体。
-    // 跳过它，把整段留到最后按公式画。
-    const index = match.index
-    const inside = math.find((range) => range.from <= index && index < range.to)
-    if (inside) {
-      INLINE_RE.lastIndex = inside.to
-      continue
-    }
-    if (index > last) write(parent, last, index)
-    const g = match.groups ?? {}
-    const at = match.indices?.groups ?? {}
-    const matchEnd = index + match[0].length
-    // 严格方言（偏好设置关掉「宽松强调」）：下划线强调不跨词内生效，汉字也算词字符
-    // （与正文、与 2.6 的行为一致）。宽松方言下只拦 ASCII 词字符，`前__加粗__后` 照常渲染。
-    if (!documentDialect.looseEmphasis && (g.strongU !== undefined || g.emU !== undefined)) {
-      const before = index > 0 ? text[index - 1] : ''
-      const after = matchEnd < text.length ? text[matchEnd] : ''
-      if (UNICODE_WORD_CHAR.test(before) || UNICODE_WORD_CHAR.test(after)) {
-        write(parent, index, index + 1)
-        last = index + 1
-        INLINE_RE.lastIndex = last
-        continue
-      }
-    }
-    // 成对的行内 HTML 可能一次吃掉开标签到闭标签的整段，记录吃到哪儿
-    let consumedTo = -1
-    if (g.strong !== undefined || g.strongU !== undefined) {
-      const el = document.createElement('strong')
-      const [from, to] = at.strong ?? at.strongU ?? [0, 0]
-      recurse(el, from, to)
-      parent.appendChild(el)
-    } else if (g.em !== undefined || g.emU !== undefined) {
-      const el = document.createElement('em')
-      const [from, to] = at.em ?? at.emU ?? [0, 0]
-      recurse(el, from, to)
-      parent.appendChild(el)
-    } else if (g.code !== undefined) {
-      const el = document.createElement('code')
-      if (at.code) {
-        // CommonMark：内容两端同时是空格（且不全是空格）时各剥掉一格
-        const strip = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? 1 : 0
-        appendText(el, text, at.code[0] + strip, at.code[1] - strip, marks)
-      } else {
-        el.textContent = g.code.trim() && /^\s/.test(g.code) && /\s$/.test(g.code) ? g.code.slice(1, -1) : g.code
-      }
-      parent.appendChild(el)
-    } else if (g.strike !== undefined) {
-      const el = document.createElement('s')
-      const [from, to] = at.strike ?? [0, 0]
-      recurse(el, from, to)
-      parent.appendChild(el)
-    } else if (g.highlight !== undefined) {
-      const el = document.createElement('mark')
-      el.className = 'cm-md-highlight'
-      const [from, to] = at.highlight ?? [0, 0]
-      recurse(el, from, to)
-      parent.appendChild(el)
-    } else if (g.alt !== undefined) {
-      const img = document.createElement('img')
-      img.src = resolveImageSrc(g.src ?? '', base)
-      img.alt = g.alt
-      // 图片是一整块：匹配盖住整段图片源码（或整段 alt）才给图加高亮
-      const className = markClassCovering(marks, index, matchEnd)
-        || (at.alt ? markClassCovering(marks, at.alt[0], at.alt[1]) : '')
-      if (className) img.classList.add(className)
-      parent.appendChild(img)
-    } else if (g.linkText !== undefined) {
-      const el = document.createElement('a')
-      const [from, to] = at.linkText ?? [0, 0]
-      // 空文字的空链接仍然把地址顶上来，否则格子里什么都看不见
-      if (to > from) recurse(el, from, to)
-      else if (at.href) appendText(el, text, at.href[0], at.href[1], marks)
-      else el.textContent = g.href ?? ''
-      const href = (g.href ?? '').trim()
-      if (/^https?:\/\//i.test(href)) el.setAttribute('href', href)
-      parent.appendChild(el)
-    } else if (g.autolink !== undefined) {
-      const address = g.autolink
-      const el = document.createElement('a')
-      appendText(el, text, at.autolink?.[0] ?? 0, at.autolink?.[1] ?? text.length, marks)
-      el.setAttribute('href', /^[a-z][a-z0-9+.-]*:/i.test(address) ? address : `mailto:${address}`)
-      parent.appendChild(el)
-    } else if (g.escape !== undefined) {
-      // 只显示被转义的那个字符（反斜杠不显示）
-      appendText(parent, text, index + 1, index + 2, marks)
-    } else if (g.entity !== undefined) {
-      appendLiteral(parent, decodeEntity(match[0]) ?? match[0], markClassCovering(marks, index, matchEnd))
-    } else if (g.htmlTag !== undefined) {
-      const tag = parseHtmlTag(g.htmlTag)
-      const close = tag && !tag.closing && !tag.selfClosing && !HTML_VOID.has(tag.name)
-        ? cellCloseTag(text, matchEnd, tag.name)
-        : null
-      if (tag && close) {
-        const styleAttr = /\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag.attrs)
-        const style = styleAttr ? cleanStyle(styleAttr[1] ?? styleAttr[2] ?? '') : ''
-        const otherAttrs = tag.attrs.replace(/\sstyle\s*=\s*(?:"[^"]*"|'[^']*')/i, '').trim()
-        const semantic = HTML_SEMANTIC[tag.name]
-        const el = document.createElement('span')
-        if (!semantic && otherAttrs) {
-          // 带其它属性的标签：整段交给消毒器画成真 HTML。
-          // 消毒后的 DOM 与源码对不上号，只有匹配盖住整段才给外壳加高亮
-          el.className = 'cm-md-html-inline'
-          const className = markClassCovering(marks, index, close.to)
-          if (className) el.classList.add(className)
-          el.appendChild(sanitizeHTML(text.slice(index, close.to)))
-        } else {
-          if (semantic) el.classList.add(`cm-md-html-${semantic}`)
-          if (style) el.setAttribute('style', style)
-          recurse(el, matchEnd, close.from)
-        }
-        parent.appendChild(el)
-        consumedTo = close.to
-      } else {
-        // 单标签（<br>、<img>）或没配上对的标签：消毒后画出来
-        const el = document.createElement('span')
-        el.className = 'cm-md-html-inline'
-        const className = markClassCovering(marks, index, matchEnd)
-        if (className) el.classList.add(className)
-        el.appendChild(sanitizeHTML(g.htmlTag))
-        parent.appendChild(el)
-      }
-    } else if (/^<br/i.test(match[0])) {
-      parent.appendChild(document.createElement('br'))
-    }
-    last = consumedTo >= 0 ? consumedTo : matchEnd
-    INLINE_RE.lastIndex = last
-  }
-  if (last < text.length) write(parent, last, text.length)
 }
 
 function collectTables(
@@ -1723,6 +1383,9 @@ function collectHTML(
     // 交给消毒器：注释被丢掉，后面的文字照常显示。段落中间的注释由 collectInline 藏掉。
     const block = node.name === 'HTMLBlock' || node.name === 'CommentBlock'
     if (!block && node.name !== 'HTMLTag') return
+    // `<img>` 标签交给 collectImages 当图片画（相对路径按文档地址解析、可以缩放），
+    // 不走这里的「光标进块就露源码」
+    if (node.name !== 'CommentBlock' && IMG_TAG_RE.test(state.doc.sliceString(node.from, node.to).trim())) return false
     if (block) {
       zones.push({ from: node.from, to: node.to, kind: 'block' })
       // 块级 HTML：光标在块里就退回源码；查找的当前项落在块里时也退回源码——
@@ -1789,40 +1452,6 @@ function collectHTML(
     })
     return false
   })
-}
-
-/**
- * 行内 HTML 标签的语义映射：标签名 → 样式类后缀（`cm-md-html-后缀`，样式在
- * editor-preview.css）。列在这里的标签用「藏标签 + 加样式」画，中间的文字仍是
- * 普通的 markdown。此前的实现只认带 style 的成对标签，`<u>`、`<b>`、`<sub>`
- * 这些最常见的语义标签被画成一对空元素，对文字毫无作用（2026-11-23 全语法审计）。
- */
-const HTML_SEMANTIC: Record<string, string> = {
-  u: 'u', b: 'b', strong: 'b', em: 'em', i: 'em', sub: 'sub', sup: 'sup', kbd: 'kbd', mark: 'mark',
-  s: 's', del: 's', strike: 's', code: 'code', samp: 'code', tt: 'code',
-  ins: 'ins', small: 'small', big: 'big', q: 'q', abbr: 'abbr', var: 'var',
-}
-
-/** 空元素：没有闭标签，自成一体（`<br>`、`<img>`、`<hr>`）。 */
-const HTML_VOID = new Set(['br', 'img', 'hr', 'wbr', 'area', 'base', 'col', 'embed', 'source', 'track'])
-
-interface ParsedHtmlTag {
-  name: string
-  attrs: string
-  closing: boolean
-  selfClosing: boolean
-}
-
-function parseHtmlTag(raw: string): ParsedHtmlTag | null {
-  const match = /^<\s*(\/?)\s*([a-zA-Z][a-zA-Z0-9-]*)((?:\s[^>]*)?)>$/.exec(raw)
-  if (!match) return null
-  const selfClosing = /\/\s*$/.test(match[3] ?? '')
-  return {
-    name: match[2].toLowerCase(),
-    attrs: (match[3] ?? '').replace(/\/\s*$/, ''),
-    closing: match[1] === '/',
-    selfClosing,
-  }
 }
 
 /** 在同一个块里找开标签对应的闭标签（同名标签正确计数嵌套）。 */
@@ -1896,24 +1525,43 @@ function collectImages(
   occupy?: { from: number; to: number }[],
   /** 整段被换成 widget 的区间，高亮 `==` 不许跨过去配对。 */
   opaque?: { from: number; to: number }[],
+  /** 可披露的构造（见 revealKeyOf）：`<img>` 标签不在语法树的 Image 节点里，要单独记。 */
+  extras?: RevealExtra[],
 ): void {
   const base = state.field(documentFileUrlField, false) ?? documentFileUrl
-  iterateContent(state, front, (node) => {
-    if (node.name !== 'Image') return
-    occupy?.push({ from: node.from, to: node.to })
-    opaque?.push({ from: node.from, to: node.to })
+  const push = (from: number, to: number, src: string, alt: string, width: number, html: boolean): boolean => {
+    occupy?.push({ from, to })
+    opaque?.push({ from, to })
     // 光标在图片源码的开头就退回源码：改路径就是改文字（见 constructRevealed）；
     // 查找的当前项落在图片源码里时也退回源码——画出来的图里没有这段文字可高亮
-    if (constructRevealed(state, node.node) || searchCurrentIn(state, node.from, node.to)) return false
+    if (within(state, from, to - 1) || searchCurrentIn(state, from, to)) return false
+    const source = state.doc.sliceString(from, to)
+    ranges.push({
+      from,
+      to,
+      deco: Decoration.replace({ widget: new ImageWidget(resolveImageSrc(src, base), alt, source, from, to, width, html) }),
+    })
+    return false
+  }
+  iterateContent(state, front, (node) => {
+    // ColaMD CT（2026-11-24）：`<img …>` 标签也是图片。缩放过的图片是这个写法（见
+    // shared/image-syntax）；以前它被当成普通行内 HTML，相对路径不按文档地址解析，
+    // 本地图片整个显示不出来。
+    if (node.name === 'HTMLTag' || node.name === 'HTMLBlock') {
+      const raw = state.doc.sliceString(node.from, node.to)
+      if (!IMG_TAG_RE.test(raw.trim())) return
+      const tag = raw.trim()
+      const from = node.from + raw.length - raw.trimStart().length
+      const to = from + tag.length
+      const width = Number.parseInt(imgAttr(tag, 'width') ?? '', 10)
+      extras?.push({ from, to })
+      return push(from, to, imgAttr(tag, 'src') ?? '', imgAttr(tag, 'alt') ?? '', width > 0 ? width : 0, true)
+    }
+    if (node.name !== 'Image') return
     const source = state.doc.sliceString(node.from, node.to)
     const parsed = parseImage(source)
     if (!parsed) return false
-    ranges.push({
-      from: node.from,
-      to: node.to,
-      deco: Decoration.replace({ widget: new ImageWidget(resolveImageSrc(parsed.src, base), parsed.alt, source, node.from, node.to) }),
-    })
-    return false
+    return push(node.from, node.to, parsed.src, parsed.alt, 0, false)
   })
 }
 
@@ -2280,7 +1928,7 @@ function collectInline(
 // 修复对（v2.7.21）：语法树把定界符**错配**走时（见 analyzeEmphasisRepair）例外，
 // 只在定界符上与错配节点相交、内容干净——照画，并撤掉错配节点的加粗。
 
-/** 宽松层要扫的「段落」：正文段落 + 标题文字部分。 */
+/** 宽松层要扫的「段落」：正文段落 + 标题文字部分 + 表格的每一格。 */
 function collectParagraphs(state: EditorState, front: Range | null): { from: number; to: number }[] {
   const out: { from: number; to: number }[] = []
   iterateContent(state, front, (node) => {
@@ -2291,8 +1939,38 @@ function collectParagraphs(state: EditorState, front: Range | null): { from: num
       const mark = node.node.getChild('HeaderMark')
       if (mark) out.push({ from: node.from, to: mark.from - 1 })
     }
+    // ColaMD CT（2026-11-24）：光标落进表格时整块退回源码，格子里的文字由装饰层来画。
+    // 以前这里没有表格，`**“这个”**` 在渲染好的表格里是粗体，光标一进表格就掉回普通字
+    // （看着像「点一下表格格式就没了」）。一格算一段：不跨管子配对，与格子渲染器的规矩一致。
+    if (node.name === 'Table') {
+      let at = node.from
+      for (const line of state.doc.sliceString(node.from, node.to).split('\n')) {
+        for (const cell of rowCellRanges(line)) out.push({ from: at + cell.from, to: at + cell.to })
+        at += line.length + 1
+      }
+    }
   })
   return out
+}
+
+/** 表格源码的一行里各个格子的文字区间（行内下标，去掉管子与首尾空白）。 */
+function rowCellRanges(line: string): { from: number; to: number }[] {
+  const cells: { from: number; to: number }[] = []
+  let start = -1
+  for (let i = 0; i <= line.length; i++) {
+    const char = line[i]
+    if (char === '\\' && line[i + 1] === '|') {
+      i++
+      continue
+    }
+    if (char === '|' || char === undefined) {
+      if (start >= 0) cells.push({ from: start, to: i })
+      start = -1
+    } else if (start < 0 && char !== ' ' && char !== '\t') {
+      start = i
+    }
+  }
+  return cells
 }
 
 // `_` 的词内防误伤只看 ASCII 词字符（snake_case_name 不能变斜体）；
@@ -2304,7 +1982,11 @@ interface LoosePairSpec {
   delim: string
   cls: string
   wordGuard: boolean
+  /** 夹在中间的内容必须满足它才算一对（上下标的防误伤，见 SCRIPT_SPECS）。 */
+  content?: RegExp
 }
+
+const SCRIPT_CONTENT = /^[A-Za-z0-9+-]{1,10}$/
 
 const LOOSE_SPECS: LoosePairSpec[] = [
   { delim: '**', cls: 'cm-md-strong', wordGuard: false },
@@ -2312,8 +1994,12 @@ const LOOSE_SPECS: LoosePairSpec[] = [
   { delim: '~~', cls: 'cm-md-strike', wordGuard: false },
   { delim: '*', cls: 'cm-md-em', wordGuard: false },
   { delim: '_', cls: 'cm-md-em', wordGuard: true },
+  // Typora 的上下标写法：`x^2^`、`H~2~O`（2026-11-24 用户让排查漏掉的格式时补上）。
+  // 中间只认短短一串 ASCII 字母数字：`5~10天，7~12天`、`pH7~14和20~30` 这类区间写法
+  // 才不会被当成下标。单个 `~` 只在前后都不是 `~` 时才算定界符，删除线 `~~x~~` 不受影响。
+  { delim: '^', cls: 'cm-md-html-sup', wordGuard: false, content: SCRIPT_CONTENT },
+  { delim: '~', cls: 'cm-md-html-sub', wordGuard: false, content: SCRIPT_CONTENT },
 ]
-
 /** 宽松扫描里的一个候选配对（文档绝对坐标）。 */
 interface LoosePair {
   /** 配对整段 [from, to)。 */
@@ -2455,7 +2141,14 @@ function enumerateLoosePairs(
         else hi = mid
       }
       if (lo >= closers.length) { i++; continue }
-      const close = closers[lo]
+      // 有内容要求的（上下标）：这一个闭侧夹出来的内容不合格，就往后找下一个闭侧
+      let close = closers[lo]
+      while (spec.content && !spec.content.test(text.slice(i + d, close))) {
+        lo++
+        if (lo >= closers.length || closers[lo] - i > 12) break
+        close = closers[lo]
+      }
+      if (spec.content && !spec.content.test(text.slice(i + d, close))) { i++; continue }
       const openFrom = map[i]
       const closeFrom = map[close]
       const openClaim = claimAt(openFrom, d)
@@ -2575,8 +2268,21 @@ function collectLooseEmphasis(
       if (pair.sameNode) return false
       const isRepair = repairKeys.has(`${pair.openFrom}:${pair.closeFrom}`)
       // 修复对不检查 occupy——它与语法树的交集只在定界符上（错配节点的标记），
-      // 内容是干净的。补画对（两侧都没被认领）仍按老规矩：与任何认领区间相交就不画。
-      if (!isRepair && (overlaps(pair.from, pair.to) || painted.some((span) => pair.from < span.to && pair.to > span.from))) {
+      // 内容是干净的。补画对（两侧都没被认领）看**定界符**：定界符本身落在认领区间里
+      // （代码、公式、链接地址、HTML 标签里的 `*` 不是定界符）才不画。
+      //
+      // ColaMD CT（2026-11-24 用户截图：「以**以太网广播帧（目的 MAC 为 `FF:FF…`）**发出」
+      // 不加粗）：以前这里是「与任何认领区间相交就不画」，于是加粗**内部**嵌着行内代码、
+      // 链接、公式、高亮时整对被否掉。嵌套是合法结构：区间整个落在这对定界符之间就不算冲突。
+      // （交叉的情形一定会压到某一侧的定界符上，所以只查定界符就够了。）
+      if (!isRepair && (overlaps(pair.openFrom, pair.openFrom + pair.d) || overlaps(pair.closeFrom, pair.closeFrom + pair.d))) {
+        return false
+      }
+      // 已画上的区间（本函数产出）同理：只拦交叉——单 `*` 不能跨过 `**` 配对，
+      // 但 `**（a *“b”* c）**` 这种里外都要补画的嵌套要画得出来（谁整个包住谁都算嵌套）
+      const nested = (span: { from: number; to: number }): boolean =>
+        (pair.from >= span.from && pair.to <= span.to) || (span.from >= pair.from && span.to <= pair.to)
+      if (!isRepair && painted.some((span) => pair.from < span.to && pair.to > span.from && !nested(span))) {
         return false
       }
       // 光标在这段强调里（或紧贴两端）时定界符压淡显形，可以就地改（与合法强调同一手感）
@@ -2708,7 +2414,7 @@ function buildDecorations(state: EditorState, flash: { from: number; to: number 
   collectLinks(state, ranges, front, occupy)
   collectFootnotes(state, text, ranges, front, extras)
   collectHTML(state, ranges, front, zones, occupy, extras)
-  collectImages(state, ranges, front, occupy, opaque)
+  collectImages(state, ranges, front, occupy, opaque, extras)
   collectPages(state, ranges, front)
   collectInline(state, ranges, front, occupy, repair.suppress, repair.repairs)
   collectFrontmatter(state, ranges, front, zones)

@@ -14,6 +14,7 @@ import { applyEditorFont, clearEditorFont, loadSavedEditorFont, resetEditorFontS
 import { initCommandKeymap, applyKeybindings } from './editor/keymap-config'
 import { setImageDocPathProvider } from './editor/image-input'
 import { loadTableWidthsFor, runTableMenuAction, setRememberTableWidths, type TableAction } from './editor/table-ops'
+import { applyImageMenuAction } from './editor/image-info'
 import { primeDialect, setDialectEffect } from './editor/live-preview'
 import { showPreferences } from './preferences'
 import { setupAppMenu, bindModuleButtons, MENU_MODULES } from './app-menu'
@@ -1350,7 +1351,12 @@ function scheduleOutlineActiveSync(): void {
   outlineSyncQueued = true
   requestAnimationFrame(() => {
     outlineSyncQueued = false
+    const view = getEditorView()
+    const viewport = view?.viewport
     syncOutlineActive()
+    // CodeMirror 在同一帧里按新的滚动位置重排，排完才修正它自己记的视口。视口在这一帧
+    // 里变了，说明量的时候它还没跟上，再等一帧补量一次（见 visualActiveIndex）。
+    if (!sourceModeActive && view && view.viewport !== viewport) scheduleOutlineActiveSync()
   })
 }
 
@@ -1361,11 +1367,23 @@ function syncOutlineActive(): void {
   setActiveOutlineIndex(sourceModeActive ? sourceActiveIndex() : visualActiveIndex())
 }
 
-// 视觉模式下的阅读进度：拿每一条标题所在行在正文坐标系里的位置，跟视口顶部比。
+// 视觉模式下的阅读进度：视口顶部的阅读线落在哪一节，就高亮哪一条。
 //
 // 旧实现找的是 DOM 里的 <h1>…<h6> 元素（ProseMirror 会把标题渲成真标签）。CodeMirror 不产
-// 生这些元素，标题只是带装饰的一行文字，所以改成用编辑器自己的行位置来算：
-// lineBlockAt 给出行在正文坐标系里的 top，减去滚动量就是它相对视口的位置。
+// 生这些元素，标题只是带装饰的一行文字，所以按标题那一行的位置来算。
+//
+// 位置必须量真实 DOM（coordsAtPos），不能用 lineBlockAt 的正文坐标（2026-11-24 用户第三次
+// 报「高亮不跟随」才查出来）：lineBlockAt 的 top 是 CodeMirror 的高度表累加出来的，而高度表
+// 只量过**滚到过的地方**，没滚到的块按「一行文字」估。表格、代码块、图片、公式都比一行
+// 文字高得多，于是文档前半段只要有一块没量过的，后面每条标题的估算位置都偏——实测带
+// 表格和代码块的笔记，高亮差一到两节（真实在第 3 节，高亮停在第 4 节）。纯文字的文档
+// 估得准，所以离屏验收一直是绿的。
+//
+// 现在只信三样东西：
+//   - 视口上方的标题（起点在 view.viewport.from 之前）：一定在阅读线上方，不用量；
+//   - 视口里的标题：coordsAtPos 量它在滚动容器里的真实纵向位置，与阅读线比；
+//   - 视口下方的标题：一定在阅读线下面，到此为止。
+// 视口里的位置偶尔量不到（那一帧还没排出来）才退回估算值，下一帧再补量。
 function visualActiveIndex(): number {
   const view = getEditorView()
   if (!view) return -1
@@ -1373,12 +1391,21 @@ function visualActiveIndex(): number {
   const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 2
   if (atBottom) return outlineItems.length - 1
   const threshold = Math.min(96, container.clientHeight * 0.2)
+  const viewport = view.viewport
+  const scrollerTop = container.getBoundingClientRect().top + container.clientTop
   let index = -1
   for (let i = 0; i < outlineItems.length; i += 1) {
     const line = outlineItems[i].line
     if (line === undefined || line >= view.state.doc.lines) continue
-    const top = view.lineBlockAt(view.state.doc.line(line + 1).from).top
-    if (top - container.scrollTop > threshold) break
+    const pos = view.state.doc.line(line + 1).from
+    if (pos < viewport.from) {
+      index = i
+      continue
+    }
+    if (pos >= viewport.to) break
+    const rect = view.coordsAtPos(pos)
+    const top = rect ? rect.top - scrollerTop : view.lineBlockAt(pos).top - container.scrollTop
+    if (top > threshold) break
     index = i
   }
   return index
@@ -1955,6 +1982,11 @@ async function init(): Promise<void> {
     const view = getEditorView()
     if (view) runTableMenuAction(view, action as TableAction)
   })
+  // ColaMD CT：图片右键菜单里改文档的那几个动作（缩放 / 编辑地址 / 图片信息）
+  api.onImageMenuAction(({ action, from, to }) => {
+    const view = getEditorView()
+    if (view) applyImageMenuAction(view, from, to, action)
+  })
   updateUiLanguage()
 
   await createEditor('editor', (markdown) => {
@@ -2042,12 +2074,17 @@ async function init(): Promise<void> {
   // `.cm-scroller` 上，`#editor` 自己不动，而 scroll / scrollend 都不冒泡——
   // 只挂在 #editor 上等于永远收不到，高亮停在点击处不跟手。两个元素都挂
   // （重复触发无害：sync 有 rAF 合并，endOutlineJump 幂等）。
+  const onScrollEnd = (): void => {
+    endOutlineJump()
+    // 滚停之后再量一次：滚动过程中 CodeMirror 还在按新位置重排，最后一帧的位置最准
+    scheduleOutlineActiveSync()
+  }
   for (const target of [editorEl(), editorScroller()]) {
     target.addEventListener('scroll', scheduleOutlineActiveSync, { passive: true })
-    target.addEventListener('scrollend', endOutlineJump)
+    target.addEventListener('scrollend', onScrollEnd)
   }
   sourceEl().addEventListener('scroll', scheduleOutlineActiveSync, { passive: true })
-  sourceEl().addEventListener('scrollend', endOutlineJump)
+  sourceEl().addEventListener('scrollend', onScrollEnd)
   // Anchor-link jumps start inside the editor; the phase signal engages the
   // same jump lock the outline clicks use, so the highlight cannot be stolen
   // by sections passed along the way (review on #68).

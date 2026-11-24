@@ -9,77 +9,38 @@
 // （文件面板、大纲都算），CM keymap 只在编辑器聚焦时生效；而改绑后要热更新，
 // 一个 document 监听器换一张查找表比 compartment 重配扩展简单得多。
 
-import { mergeAccelerators, normalizeAccelerator } from '../../shared/commands'
+import { acceleratorFromEvent, canonicalKey, displayAccelerator, mergeAccelerators } from '../../shared/commands'
 import { getEditorView } from './editor'
 import { runFormatCommand, type FormatCommandId } from './format-commands'
 
 /** 规范化 accelerator → 命令 id。 */
 let bindings = new Map<string, FormatCommandId>()
+/** 当前生效的「命令 id → accelerator」（默认 + 用户改绑；空串 = 解绑）。菜单提示从这里取。 */
+let accelerators: Record<string, string> = mergeAccelerators(undefined)
 let installed = false
 
-/**
- * 符号键 → 物理键（美式键盘）。改绑捕获存的本来就是物理键形式；但手写进
- * settings.json 的加速键可能是按字符写的（`Ctrl+Shift+^`、`Ctrl+Shift+Backquote`），
- * 归一到物理键之后才和键盘事件的规范形式对得上。
- */
-const PHYSICAL_KEY: Record<string, string> = {
-  '+': '=', plus: '=', '~': '`', backquote: '`',
-  '!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8', '(': '9', ')': '0',
-  '_': '-', minus: '-', equal: '=', '{': '[', '}': ']', '|': '\\', ':': ';', '"': "'",
-  '<': ',', '>': '.', '?': '/', space: 'space',
-}
-
-/** accelerator 的键位部分先归一到物理键：`+` 在键盘上就是 `=`（Shift+=）。 */
-function normalizeForLookup(accelerator: string): string {
-  const normalized = normalizeAccelerator(accelerator)
-  const parts = normalized.split('+')
-  const key = parts.pop() ?? ''
-  const mapped = PHYSICAL_KEY[key] ?? key
-  return [...parts, mapped].join('+')
-}
-
-export function applyKeybindings(accelerators: Record<string, string>): void {
+export function applyKeybindings(merged: Record<string, string>): void {
   const next = new Map<string, FormatCommandId>()
-  for (const [id, accelerator] of Object.entries(accelerators)) {
+  accelerators = merged
+  for (const [id, accelerator] of Object.entries(merged)) {
     if (!accelerator) continue // 空串 = 用户解绑
-    const normalized = normalizeForLookup(accelerator)
+    const normalized = canonicalKey(accelerator)
     if (normalized.split('+').length < 2) continue // 没有修饰键的不进这张表（不拦裸键）
     next.set(normalized, id as FormatCommandId)
   }
   bindings = next
 }
 
-/** 把一个键盘事件折成与 normalizeAccelerator 同构的规范形式。 */
-function canonicalOf(event: KeyboardEvent): string | null {
-  const hasCtrl = event.ctrlKey || event.metaKey
-  const hasAlt = event.altKey
-  if (!hasCtrl && !hasAlt) return null
-  const key = physicalKeyOf(event)
-  if (!key) return null
-  // 纯 Alt+字母/数字不拦：那是 Windows 菜单访问键 / macOS 特殊字符的地盘；
-  // Alt+符号（如 Alt+= 标题升降级）放行
-  if (!hasCtrl && hasAlt && /^[a-z0-9]$/.test(key)) return null
-  const mods: string[] = []
-  if (hasCtrl) mods.push('ctrl')
-  if (hasAlt) mods.push('alt')
-  if (event.shiftKey) mods.push('shift')
-  return [...mods].sort().join('+') + '+' + key
+/** 某条命令此刻的键，写成给人看的形式；没绑返回 undefined。标题栏模块菜单的提示用它。 */
+export function commandKeyLabel(id: string): string | undefined {
+  const accelerator = accelerators[id]
+  return accelerator ? displayAccelerator(accelerator) : undefined
 }
 
-/** 物理键名：优先 event.code（布局无关），认不出再退 event.key。 */
-function physicalKeyOf(event: KeyboardEvent): string | null {
-  const code = event.code
-  if (!code) return event.key.length === 1 ? event.key.toLowerCase() : null
-  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase()
-  if (/^Digit\d$/.test(code)) return code.slice(5)
-  const named: Record<string, string> = {
-    Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backquote: '`',
-    Comma: ',', Period: '.', Slash: '/', Backslash: '\\', Semicolon: ';', Quote: "'",
-    Space: 'space',
-  }
-  if (code in named) return named[code]
-  if (/^F\d{1,2}$/.test(code)) return code.toLowerCase()
-  return event.key.length === 1 ? event.key.toLowerCase() : null
+/** 把一个键盘事件折成与 canonicalKey 同构的规范形式。 */
+function canonicalOf(event: KeyboardEvent): string | null {
+  const accelerator = acceleratorFromEvent(event)
+  return accelerator ? canonicalKey(accelerator) : null
 }
 
 /** 输入类控件里的按键不触发命令（搜索框、偏好设置的输入框、改绑捕获键、

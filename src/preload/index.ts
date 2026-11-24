@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AppSettings, SettingsPatch } from '../shared/settings-types'
+import type { ImageMenuRequest } from '../shared/image-syntax'
 
 export interface SiblingFile {
   name: string
@@ -114,6 +115,9 @@ export interface ElectronAPI {
   statImage: (url: string) => Promise<{ size: number; mtime: number } | null>
   showTableContextMenu: (payload: { canMoveRowUp: boolean; canMoveRowDown: boolean; canMoveColLeft: boolean; canMoveColRight: boolean; canDeleteRow: boolean; canDeleteCol: boolean }) => Promise<void>
   onTableMenuAction: (callback: (action: string) => void) => void
+  /** ColaMD CT：图片右键菜单（缩放 / 复制 / 打开 / 定位 / 另存）。 */
+  showImageContextMenu: (payload: ImageMenuRequest) => Promise<void>
+  onImageMenuAction: (callback: (payload: { action: string; from: number; to: number }) => void) => void
   getTableWidths: (docPath: string) => Promise<Record<string, number[]> | null>
   saveTableWidths: (docPath: string | null, widths: Record<string, number[]>) => Promise<void>
   appMenuAction: (channel: string, ...args: unknown[]) => Promise<void>
@@ -316,6 +320,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   onTableMenuAction: (callback: (action: string) => void) => {
     ipcRenderer.on('table-menu-action', (_event, action: string) => callback(action))
+  },
+  showImageContextMenu: (payload: ImageMenuRequest) => {
+    return ipcRenderer.invoke('image-context-menu', payload) as Promise<void>
+  },
+  onImageMenuAction: (callback: (payload: { action: string; from: number; to: number }) => void) => {
+    ipcRenderer.on('image-menu-action', (_event, payload: { action: string; from: number; to: number }) => callback(payload))
   },
   getTableWidths: (docPath: string) => ipcRenderer.invoke('table:get-widths', docPath) as Promise<Record<string, number[]> | null>,
   saveTableWidths: (docPath: string | null, widths: Record<string, number[]>) => {

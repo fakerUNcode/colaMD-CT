@@ -23,6 +23,7 @@ import {
   WidthType,
   type ParagraphChild,
 } from 'docx'
+import { IMG_TAG_RE, imgAttr } from '../shared/image-syntax'
 
 interface MarkdownNode {
   type: string
@@ -32,6 +33,8 @@ interface MarkdownNode {
   start?: number
   url?: string
   alt?: string
+  /** `<img width>` 里的显式宽度（像素）。 */
+  width?: number
   children?: MarkdownNode[]
 }
 
@@ -115,7 +118,10 @@ function inlineRuns(nodes: MarkdownNode[] | undefined, style: { bold?: boolean; 
     } else if (node.type === 'image') {
       runs.push(new TextRun({ text: node.alt ? `[${node.alt}]` : '[image]', italics: true }))
     } else {
-      runs.push(...inlineRuns(node.children, style))
+      // 行内的 `<img …>` 标签（缩放过的图片，见 shared/image-syntax）按图片处理，不然 Word 里什么都不剩
+      const image = node.type === 'html' ? htmlImage(node.value) : null
+      if (image) runs.push(new TextRun({ text: image.alt ? `[${image.alt}]` : '[image]', italics: true }))
+      else runs.push(...inlineRuns(node.children, style))
     }
   }
   return runs
@@ -132,6 +138,19 @@ function imagePath(url: string, sourcePath: string | null): string | null {
   return isAbsolute(url) ? url : resolve(dirname(sourcePath), decodeURIComponent(url))
 }
 
+/** 一个 `<img …>` 标签的图片节点；不是图片标签返回 null。 */
+function htmlImage(value: string | undefined): MarkdownNode | null {
+  if (!value || !IMG_TAG_RE.test(value.trim())) return null
+  const tag = value.trim()
+  const width = Number.parseInt(imgAttr(tag, 'width') ?? '', 10)
+  return {
+    type: 'image',
+    url: imgAttr(tag, 'src') ?? undefined,
+    alt: imgAttr(tag, 'alt') ?? undefined,
+    ...(width > 0 ? { width } : {}),
+  }
+}
+
 function imageParagraph(node: MarkdownNode, sourcePath: string | null, images: Record<string, string> | undefined): Paragraph {
   const dataURL = node.url && images ? images[node.url] : undefined
   const image = dataURL
@@ -143,7 +162,9 @@ function imageParagraph(node: MarkdownNode, sourcePath: string | null, images: R
   if (!image || image.isEmpty()) return new Paragraph({ children: [new TextRun({ text: node.alt ? `[${node.alt}]` : '[image]', italics: true })] })
 
   const size = image.getSize()
-  const scale = Math.min(1, 560 / size.width, 420 / size.height)
+  // 缩放过的图片（`<img width>`）按写进文件的宽度出，高度跟着等比；仍不许超出页面
+  const wanted = node.width && node.width > 0 ? node.width : size.width
+  const scale = Math.min(wanted / size.width, 560 / size.width, 420 / size.height)
   return new Paragraph({
     children: [new ImageRun({
       type: 'png',
@@ -220,7 +241,9 @@ function blockNodes(nodes: MarkdownNode[] | undefined, sourcePath: string | null
     } else if (node.type === 'thematicBreak') {
       output.push(new Paragraph({ border: { bottom: { color: 'AEB7C2', space: 1, style: 'single', size: 6 } } }))
     } else if (node.type === 'html') {
-      output.push(new Paragraph({ children: [new TextRun({ text: node.value ?? '' })] }))
+      // 整段就是一个 `<img …>` 标签：按图片出（缩放过的图片是这个写法）
+      const image = htmlImage(node.value)
+      output.push(image ? imageParagraph(image, sourcePath, images) : new Paragraph({ children: [new TextRun({ text: node.value ?? '' })] }))
     } else if (node.type === 'footnoteDefinition') {
       output.push(new Paragraph({ children: [new TextRun({ text: textContent(node), size: 18, color: '667085' })] }))
     } else {

@@ -342,11 +342,21 @@
 
 /* ColaMD CT：渲染态单元格编辑。正在编辑的格子描一圈主题色边，
  * 光标用文本色；表格其余部分保持渲染。 */
+.cm-content .cm-md-table-widget th.cm-md-cell-editing,
 .cm-content .cm-md-table-widget td.cm-md-cell-editing {
   outline: 1.5px solid var(--link-color);
   outline-offset: -2px;
   caret-color: var(--text-color);
   cursor: text;
+}
+
+/* ColaMD CT：格子里的图片不许撑破格子（与正文图片同一条规矩）；右键可以缩放 */
+.cm-content .cm-md-table-widget td img,
+.cm-content .cm-md-table-widget th img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  vertical-align: bottom;
 }
 
 .cm-md-col-resizer {
