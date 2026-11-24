@@ -1,5 +1,7 @@
 
 > **说明**：本仓库是 [ColaMD](https://github.com/marswaveai/colamd)（MIT，marswave.ai 出品）的社区增强版 **ColaMD CT**。下方为上游官方 README，描述 CT 继承的全部功能；CT 新增的能力见 [README_CT.md](README_CT.md)。许可证与署名见 [LICENSE](LICENSE)。English note in [README.md](README.md).
+>
+> **下载**：CT 的安装包在**本仓库**的 [Releases](https://github.com/fakerUNcode/colaMD-CT/releases)（下方「下载」一节已改指向本仓库），不要走上文指向官方仓库的链接。
 
 > 一款免费、优雅、谁都能上手的 Markdown 编辑器。没有工具栏，没有多余的东西，而且文件永远是最新的。
 
@@ -12,7 +14,7 @@ ColaMD 是一款开源、免费、优雅的 Markdown 编辑器，用于写作、
 无论是什么在写这个文件（Claude Code、Codex 这类 AI Agent，一个脚本，或另一个编辑器），ColaMD 都会立刻显示最新内容，不用重开文件，也不用手动刷新。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub release](https://img.shields.io/github/release/marswaveai/colamd.svg)](https://github.com/marswaveai/colamd/releases)
+[![CT releases](https://img.shields.io/badge/Releases-CT_builds-blue)](https://github.com/fakerUNcode/colaMD-CT/releases)
 
 [下载](#下载) | [功能](#功能)
 
@@ -88,15 +90,18 @@ ColaMD 不要求你改变现有习惯，也适合与 Obsidian、Typora、VS Code
 
 ## 下载
 
-> 查看 [Releases](https://github.com/marswaveai/colamd/releases) 获取最新构建。
+> **CT 的安装包发布在本仓库的 [Releases](https://github.com/fakerUNcode/colaMD-CT/releases)**，下面每个版本都有；官方 ColaMD 自己的发布页在上游仓库。
 
-| 平台      | 格式                   |
+| 平台 | 格式 |
 | ------- | -------------------- |
-| macOS   | `.dmg`               |
-| Windows | `.exe`               |
-| Linux   | `.AppImage` / `.deb` |
+| macOS（Apple 芯片与 Intel） | `.dmg` · `.pkg` · `.zip`（未签名） |
+| Windows | `ColaMD-CT-Setup-<v>.exe` · 便携 `.zip` |
+| Linux | `.AppImage` · `.deb` |
 
-macOS 上也可以用社区维护的 Homebrew Cask，它跟着每次发布更新：`brew install --cask colamd`。
+- ColaMD CT 与官方版**并行安装、互不影响**（独立应用标识 `ai.marswave.colamdct`）。
+- CT 按设计禁用了应用内更新：新版本直接来 Releases 下载。
+- macOS 包未签名：首次启动右键 → 打开（dmg 版），详见 [README_CT.md](README_CT.md) 的说明。
+- 下文提到的 Homebrew Cask 属于**官方版**，跟的是上游的发布，装不到 CT。
 
 ## 路线图
 

@@ -3,6 +3,8 @@
 > **Note:** This repository hosts **ColaMD CT**, the community-enhanced fork of [ColaMD](https://github.com/marswaveai/colamd) (MIT, by marswave.ai). The README below is the upstream one and describes what CT inherits; what CT adds is documented in [README_CT.md](README_CT.md). License and attribution: [LICENSE](LICENSE).
 >
 > **说明**：本仓库是 [ColaMD](https://github.com/marswaveai/colamd)（MIT，marswave.ai 出品）的社区增强版 **ColaMD CT**。下方为上游官方 README，描述 CT 继承的全部功能；CT 新增的能力见 [README_CT.md](README_CT.md)。许可证与署名见 [LICENSE](LICENSE)。
+>
+> **Download / 下载**：CT 的安装包在**本仓库**的 [Releases](https://github.com/fakerUNcode/colaMD-CT/releases)（下方 Download 一节已改指向本仓库）；不要走上文指向官方仓库的链接。
 
 > A free, elegant Markdown editor anyone can pick up. No toolbars, no clutter, and the file on disk is always what you see.
 
@@ -15,7 +17,7 @@ It offers true WYSIWYG editing, 12 built-in themes, rich-text copy, smart line b
 Whatever writes the file (an AI agent such as Claude Code or Codex, a script, or another editor), ColaMD shows the new content right away. No reopening, no manual refresh.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub release](https://img.shields.io/github/release/marswaveai/colamd.svg)](https://github.com/marswaveai/colamd/releases)
+[![CT releases](https://img.shields.io/badge/Releases-CT_builds-blue)](https://github.com/fakerUNcode/colaMD-CT/releases)
 
 [Download](#download) | [Features](#features)
 
@@ -69,15 +71,18 @@ ColaMD does not ask you to change your habits. It works well alongside Obsidian,
 
 ## Download
 
-> Check [Releases](https://github.com/marswaveai/colamd/releases) for the latest builds.
+> **CT builds are published in [this repository's Releases](https://github.com/fakerUNcode/colaMD-CT/releases)**, for every version below. The official ColaMD's own releases live where the upstream links used to point.
 
-| Platform | Format |
-|----------|--------|
-| macOS    | `.dmg` |
-| Windows  | `.exe` |
-| Linux    | `.AppImage` / `.deb` |
+| Platform | Formats |
+|----------|---------|
+| macOS (Apple silicon & Intel) | `.dmg` · `.pkg` · `.zip` (unsigned) |
+| Windows | `ColaMD-CT-Setup-<v>.exe` · portable `.zip` |
+| Linux | `.AppImage` · `.deb` |
 
-On macOS the community-maintained Homebrew cask follows each release: `brew install --cask colamd`.
+- ColaMD CT installs **beside** the official app (its own app id `ai.marswave.colamdct`); the two coexist.
+- In-app updates are disabled in CT by design: pick up the next version from Releases.
+- macOS builds are unsigned: on first launch right-click the app → Open (dmg), or see the notes in [README_CT.md](README_CT.md).
+- The Homebrew cask mentioned below belongs to the **official** ColaMD and tracks upstream releases, not CT.
 
 ## Roadmap
 
