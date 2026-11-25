@@ -80,7 +80,12 @@ export interface ElectronAPI {
   onSetCustomCSS: (callback: (css: string) => void) => void
   onMenuImportTheme: (callback: () => void) => void
   onSearch: (callback: () => void) => void
+  onSearchNext: (callback: () => void) => void
+  onSearchPrev: (callback: () => void) => void
+  onSearchReplace: (callback: () => void) => void
   onFormatCommand: (callback: (id: string) => void) => void
+  onUndo: (callback: () => void) => void
+  onRedo: (callback: () => void) => void
   readClipboardText: () => Promise<string>
   onSiblingsChanged: (callback: (files: SiblingFile[]) => void) => void
   onToggleFilePanel: (callback: () => void) => void
@@ -125,6 +130,13 @@ export interface ElectronAPI {
   getRestoreOnLaunch: () => Promise<boolean>
   setRestoreOnLaunch: (enabled: boolean) => Promise<void>
   getRecentFiles: () => Promise<string[]>
+  clearRecentFiles: () => Promise<void>
+  exportSlidesPdf: () => Promise<void>
+  showAbout: () => Promise<void>
+  editCommand: (command: 'cut' | 'copy' | 'paste' | 'selectAll') => Promise<void>
+  listCustomThemes: () => Promise<string[]>
+  /** ColaMD CT：验收用的原生菜单快照（只读，label/accelerator/role/是否有 click）。 */
+  getMenuSpec: () => Promise<Array<{ label: string; items: Array<{ label: string; accelerator: string | null; role: string | null; hasClick: boolean; hasSubmenu: boolean }> }>>
   newWindow: () => Promise<void>
   toggleFullscreen: () => Promise<void>
   setDefaultApp: () => Promise<void>
@@ -242,8 +254,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSearch: (callback: () => void) => {
     ipcRenderer.on('editor:search', () => callback())
   },
+  // ColaMD CT：查找三件套（编辑菜单 / F3 / Ctrl+G / Ctrl+H 的菜单侧入口）
+  onSearchNext: (callback: () => void) => {
+    ipcRenderer.on('editor:search-next', () => callback())
+  },
+  onSearchPrev: (callback: () => void) => {
+    ipcRenderer.on('editor:search-prev', () => callback())
+  },
+  onSearchReplace: (callback: () => void) => {
+    ipcRenderer.on('editor:search-replace', () => callback())
+  },
   onFormatCommand: (callback: (id: string) => void) => {
     ipcRenderer.on('editor:format', (_event, id: string) => callback(id))
+  },
+  // ColaMD CT：编辑模块的撤销/重做（渲染端跑 CodeMirror 命令，与键盘同一份历史）
+  onUndo: (callback: () => void) => {
+    ipcRenderer.on('editor:undo', () => callback())
+  },
+  onRedo: (callback: () => void) => {
+    ipcRenderer.on('editor:redo', () => callback())
   },
   readClipboardText: () => ipcRenderer.invoke('read-clipboard-text') as Promise<string>,
   onSiblingsChanged: (callback: (files: SiblingFile[]) => void) => {
@@ -342,6 +371,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('set-restore-on-launch', enabled) as Promise<void>
   },
   getRecentFiles: () => ipcRenderer.invoke('get-recent-files') as Promise<string[]>,
+  // ColaMD CT：模块菜单要触达、但活在主进程里的动作（v2.7.24 起对齐原生菜单的齐全度）
+  clearRecentFiles: () => ipcRenderer.invoke('clear-recent-files') as Promise<void>,
+  exportSlidesPdf: () => ipcRenderer.invoke('export-slides-pdf') as Promise<void>,
+  showAbout: () => ipcRenderer.invoke('show-about') as Promise<void>,
+  editCommand: (command: 'cut' | 'copy' | 'paste' | 'selectAll') => ipcRenderer.invoke('edit-command', command) as Promise<void>,
+  listCustomThemes: () => ipcRenderer.invoke('list-custom-themes') as Promise<string[]>,
+  getMenuSpec: () => ipcRenderer.invoke('ct-debug:menu-spec'),
   newWindow: () => ipcRenderer.invoke('new-window') as Promise<void>,
   toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen') as Promise<void>,
   setDefaultApp: () => ipcRenderer.invoke('set-default-app') as Promise<void>,

@@ -305,9 +305,9 @@ async function main() {
       const panelOpen = () => evaluate(renderer, `!!document.querySelector('.colamd-menu-panel')`)
 
       const visible = await evaluate(renderer, `document.querySelectorAll('#titlebar .app-menu-btn:not([hidden])').length`)
-      check('标题栏有五个模块按钮（Windows）', visible === 5, `count=${visible}`)
+      check('标题栏有六个模块按钮（Windows，v2.7.24 增加编辑）', visible === 6, `count=${visible}`)
       const names = await evaluate(renderer, `[...document.querySelectorAll('#titlebar .app-menu-btn:not([hidden])')].map(b => b.id.replace('app-menu-btn-', '')).join(',')`)
-      check('模块为 文件/格式/插入/视图/更多', names === 'file,format,insert,view,more', names)
+      check('模块为 文件/编辑/格式/插入/视图/更多', names === 'file,edit,format,insert,view,more', names)
 
       // 格式：选中「文字」→ 格式面板 → 点「加粗」→ 文档变成 **文字**
       await setDoc('文字')

@@ -31,10 +31,14 @@ export function applyKeybindings(merged: Record<string, string>): void {
   bindings = next
 }
 
+// macOS 上 CmdOrCtrl 写成 Cmd：displayAccelerator 的 darwin 位此前没人传，
+// mac 的改绑列表和模块菜单提示一直显示 Ctrl（与实际键位不符）
+const IS_DARWIN = /^Mac/i.test(navigator.platform)
+
 /** 某条命令此刻的键，写成给人看的形式；没绑返回 undefined。标题栏模块菜单的提示用它。 */
 export function commandKeyLabel(id: string): string | undefined {
   const accelerator = accelerators[id]
-  return accelerator ? displayAccelerator(accelerator) : undefined
+  return accelerator ? displayAccelerator(accelerator, IS_DARWIN) : undefined
 }
 
 /** 把一个键盘事件折成与 canonicalKey 同构的规范形式。 */

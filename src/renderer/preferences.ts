@@ -373,10 +373,12 @@ export async function showPreferences(): Promise<void> {
       for (const [id, value] of overrides) if (value !== undefined) merged[id] = value
       return merged
     }
-    // 写给人看的写法与标题栏模块菜单同源（displayAccelerator）：两处看到的永远是同一个键
+    // 写给人看的写法与标题栏模块菜单同源（displayAccelerator）：两处看到的永远是同一个键；
+    // macOS 上 CmdOrCtrl 写成 Cmd（darwin 位此前没人传，mac 一直显示 Ctrl）
+    const isDarwin = /^Mac/i.test(navigator.platform)
     const displayOf = (command: EditorCommandSpec): string => {
       const value = overrides.has(command.id) ? overrides.get(command.id) as string : command.accelerator
-      return value === '' ? t.unbound : displayAccelerator(value)
+      return value === '' ? t.unbound : displayAccelerator(value, isDarwin)
     }
     const markConflicts = (): void => {
       const current = effective()

@@ -1,31 +1,36 @@
 // ColaMD CT：Windows 标题栏的模块菜单。
 //
 // 官方版在标题栏只有一个汉堡按钮，点开是整张菜单（原生菜单弹出来）——「格式」埋在
-// 编辑子菜单里，改个加粗要三次点击。这里换成**按功能拆分的五个模块按钮**：
+// 编辑子菜单里，改个加粗要三次点击。这里换成**按功能拆分的模块按钮**：
 //
 //   文件  新建/打开/最近/保存/导出/默认应用
+//   编辑  撤销、剪切复制粘贴、查找三件套——与 macOS 原生「编辑」菜单一一对应
 //   格式  加粗、斜体、标题、列表…——点一下立刻生效，一次点击到位
 //   插入  链接、图片、表格、公式…
 //   视图  源码模式、文件列表、主题、宽度、语言、字号、全屏
 //   更多  偏好设置、语法、新功能、关于
+//
+// 条目集合与原生菜单（macOS 可见的那份，src/main/index.ts buildMenu）对齐：
+// 原生菜单有的，这里也要有——两份菜单各画各的，齐全度靠 verify:menu-parity 看住。
 //
 // 每个按钮一个极简图标；点一下在按钮正下方展开该模块的面板；面板开着时悬停到
 // 另一个模块按钮上直接切换（菜单栏的手感）。二级项（标题 1-6、主题、导出…）
 // 悬停时在右侧展开。
 //
 // 行为路由：菜单项动作经 app-menu-action IPC 转发到既有 channel（menu-save、
-// editor:format…），渲染端已注册的那些监听器原样复用——与原生菜单（快捷键仍由
-// 它注册）行为永远一致，不用维护两套。格式命令的名称与快捷键提示取自
-// src/shared/commands.ts，与偏好设置里的改绑同步。
+// editor:format、open-font-settings…），渲染端已注册的那些监听器原样复用——与原生
+// 菜单（快捷键仍由它注册）行为永远一致，不用维护两套。格式命令的名称与快捷键提示
+// 取自 src/shared/commands.ts，与偏好设置里的改绑同步。
 
 import { EDITOR_COMMANDS } from '../shared/commands'
 import { commandKeyLabel } from './editor/keymap-config'
 import { isChinese } from './ui-language'
 
-export type MenuModule = 'file' | 'format' | 'insert' | 'view' | 'more'
+export type MenuModule = 'file' | 'edit' | 'format' | 'insert' | 'view' | 'more'
 
 export const MENU_MODULES: { id: MenuModule; zh: string; en: string }[] = [
   { id: 'file', zh: '文件', en: 'File' },
+  { id: 'edit', zh: '编辑', en: 'Edit' },
   { id: 'format', zh: '格式', en: 'Format' },
   { id: 'insert', zh: '插入', en: 'Insert' },
   { id: 'view', zh: '视图', en: 'View' },
@@ -44,28 +49,51 @@ interface MenuItem {
   /** 本地动作 */
   run?: () => void
   /** 二级面板（悬停展开） */
-  items?: () => MenuItem[] | Promise<MenuItem[]>
+  items?: () => MenuEntry[] | Promise<MenuEntry[]>
   /** 勾选态（主题 / 宽度 / 语言） */
   checked?: () => boolean
   /** 置灰 */
   disabled?: () => boolean
 }
 interface MenuSection {
+  /** 空字符串 = 只画分隔线，不画小标题（子菜单里的裸分隔线） */
   section: string
 }
 type MenuEntry = MenuItem | MenuSection
 
 interface Hooks {
   theme: () => string
+  /** 应用自定义主题（参数是 userData/themes 下的文件名，含 .css）。外壳接线：
+   * loadThemeCSS 拿到样式后走 applyTheme——和原生菜单的 set-theme + set-custom-css 同一条路。 */
+  customTheme: (file: string) => void
   language: () => 'zh' | 'en'
   preferences: () => void
 }
 
-let hooks: Hooks = { theme: () => 'elegant', language: () => 'zh', preferences: () => {} }
+let hooks: Hooks = { theme: () => 'elegant', customTheme: () => {}, language: () => 'zh', preferences: () => {} }
+
+/** 自定义主题文件名（含 .css），打开面板前预热、导入主题后刷新。 */
+let customThemeFiles: string[] = []
+/** 「启动时打开上次文档」的当前值：勾选态要在面板里如实显示，IPC 是异步的，
+ * 所以在 bindModuleButtons 时先热好缓存，点过之后再本地翻转。 */
+let restoreOnLaunch = false
 
 /** 外壳注册活状态（当前主题/语言）与本地动作。 */
 export function setupAppMenu(next: Hooks): void {
   hooks = next
+}
+
+/** 刷新自定义主题列表（启动时 + 导入主题后由外壳调用）。 */
+export function refreshCustomThemes(): void {
+  void window.electronAPI?.listCustomThemes?.().then((files) => {
+    if (Array.isArray(files)) customThemeFiles = files
+  })
+}
+
+async function refreshRestoreOnLaunch(): Promise<void> {
+  try {
+    restoreOnLaunch = (await window.electronAPI?.getRestoreOnLaunch()) === true
+  } catch { /* 读不到就维持现状 */ }
 }
 
 // ─── 各模块的条目 ─────────────────────────────────────────────────────────────
@@ -104,13 +132,26 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
           items: async () => {
             const files = (await window.electronAPI?.getRecentFiles()) ?? []
             if (files.length === 0) return [{ label: zh ? '没有最近打开的文件' : 'No recent files', disabled: () => true }]
-            // 同名文件靠目录区分：名字做标签，所在目录做右侧提示
-            return files.map((path) => ({
+            const entries: MenuEntry[] = files.map((path) => ({
+              // 同名文件靠目录区分：名字做标签，所在目录做右侧提示
               label: path.replace(/^.*[\\/]/, ''),
               hint: path.replace(/[\\/][^\\/]*$/, ''),
               hintIsPath: true,
               run: () => void window.electronAPI?.openFilePath(path),
             }))
+            // 尾部带上「清除最近记录」——原生 文件 菜单有这一条（macOS 可见），这里对齐
+            entries.push({ section: '' })
+            entries.push({ label: zh ? '清除最近记录' : 'Clear Recent', run: () => void window.electronAPI?.clearRecentFiles() })
+            return entries
+          },
+        },
+        {
+          // 与偏好设置「启动」区同一个开关（get/set-restore-on-launch 两条 IPC 复用）
+          label: zh ? '启动时打开上次文档' : 'Reopen Last Document at Launch',
+          checked: () => restoreOnLaunch,
+          run: () => {
+            restoreOnLaunch = !restoreOnLaunch
+            void window.electronAPI?.setRestoreOnLaunch(restoreOnLaunch)
           },
         },
         sep(zh ? '文档' : 'Document'),
@@ -127,11 +168,31 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
             { label: zh ? 'Word' : 'Word', channel: 'menu-export-docx' },
             { label: zh ? '图片（电脑阅读）' : 'Image (Desktop)', channel: 'menu-export-image', args: ['desktop'] },
             { label: zh ? '图片（手机阅读）' : 'Image (Mobile)', channel: 'menu-export-image', args: ['mobile'] },
+            // 原生 文件 菜单的第 6 项导出（跑在主进程），此前只藏在那边
+            { label: zh ? '导出幻灯片 PDF…' : 'Export Slides PDF…', run: () => void window.electronAPI?.exportSlidesPdf() },
           ],
         },
         sep(zh ? '系统' : 'System'),
         { label: zh ? '设为默认应用…' : 'Set as Default…', run: () => void window.electronAPI?.setDefaultApp() },
         { label: zh ? '关闭窗口' : 'Close Window', run: () => void window.electronAPI?.closeWindow() },
+      ]
+    case 'edit':
+      // 与 macOS 原生「编辑」菜单一一对应：撤销/重做走渲染端的 CodeMirror 命令
+      // （editor:undo/redo，与键盘同一份历史）；剪切/复制/粘贴/全选由主进程对
+      // 聚焦窗口执行浏览器原生编辑命令；查找三件套走既有 editor:search* 通道。
+      return [
+        { label: zh ? '撤销' : 'Undo', hint: 'Ctrl+Z', channel: 'editor:undo' },
+        { label: zh ? '重做' : 'Redo', hint: 'Ctrl+Y', channel: 'editor:redo' },
+        sep(zh ? '剪贴板' : 'Clipboard'),
+        { label: zh ? '剪切' : 'Cut', hint: 'Ctrl+X', run: () => void window.electronAPI?.editCommand('cut') },
+        { label: zh ? '复制' : 'Copy', hint: 'Ctrl+C', run: () => void window.electronAPI?.editCommand('copy') },
+        { label: zh ? '粘贴' : 'Paste', hint: 'Ctrl+V', run: () => void window.electronAPI?.editCommand('paste') },
+        { label: zh ? '全选' : 'Select All', hint: 'Ctrl+A', run: () => void window.electronAPI?.editCommand('selectAll') },
+        sep(zh ? '查找' : 'Find'),
+        { label: zh ? '查找' : 'Find', hint: 'Ctrl+F', channel: 'editor:search' },
+        { label: zh ? '查找下一个' : 'Find Next', hint: 'F3', channel: 'editor:search-next' },
+        { label: zh ? '查找上一个' : 'Find Previous', hint: 'Shift+F3', channel: 'editor:search-prev' },
+        { label: zh ? '替换' : 'Replace', hint: 'Ctrl+H', channel: 'editor:search-replace' },
       ]
     case 'format':
       // 快速设置格式：每一条点下去立刻生效，不用层层进子菜单
@@ -147,6 +208,9 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
             command('heading1', zh), command('heading2', zh), command('heading3', zh),
             command('heading4', zh), command('heading5', zh), command('heading6', zh),
             command('paragraph', zh),
+            { section: '' },
+            // 原生「格式→标题」子菜单里的一对，注册表有命令也有默认键（Alt+= / Alt+-）
+            command('promoteHeading', zh), command('demoteHeading', zh),
           ],
         },
         sep(zh ? '列表与块' : 'Lists & Blocks'),
@@ -163,15 +227,40 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
       return [
         { label: zh ? 'Markdown 源码' : 'Markdown Source', hint: 'Ctrl+/', channel: 'toggle-source-mode' },
         { label: zh ? '文件列表' : 'File List', hint: 'Ctrl+\\', channel: 'toggle-file-panel' },
+        {
+          // 原生 视图 菜单有这一组（偏好设置里也有），此前只在 macOS 那边可见
+          label: zh ? '文件列表位置' : 'File List Position',
+          items: () => (['right', 'left'] as const).map((side) => ({
+            label: side === 'left' ? (zh ? '在左侧' : 'On the Left') : (zh ? '在右侧' : 'On the Right'),
+            checked: () => (localStorage.getItem('colamd-panel-side') || 'right') === side,
+            channel: 'set-panel-side',
+            args: [side],
+          })),
+        },
         sep(zh ? '外观' : 'Appearance'),
+        { label: zh ? '编辑器字体…' : 'Editor Font…', channel: 'open-font-settings' },
         {
           label: zh ? '主题' : 'Theme',
-          items: () => THEME_LABELS.map(([id, zhName, enName]) => ({
-            label: zh ? zhName : enName,
-            checked: () => hooks.theme() === id,
-            channel: 'set-theme',
-            args: [id],
-          })),
+          items: () => {
+            const entries: MenuEntry[] = THEME_LABELS.map(([id, zhName, enName]) => ({
+              label: zh ? zhName : enName,
+              checked: () => hooks.theme() === id,
+              channel: 'set-theme',
+              args: [id],
+            }))
+            // 自定义主题 + 导入，与原生 主题 菜单对齐（列表在 bindModuleButtons 时预热）
+            if (customThemeFiles.length > 0) {
+              entries.push({ section: zh ? '自定义' : 'Custom' })
+              entries.push(...customThemeFiles.map((file) => ({
+                label: file.replace(/\.css$/, ''),
+                checked: () => hooks.theme() === `custom:${file}`,
+                run: () => hooks.customTheme(file),
+              })))
+            }
+            entries.push({ section: '' })
+            entries.push({ label: zh ? '导入主题…' : 'Import Theme…', channel: 'menu-import-theme' })
+            return entries
+          },
         },
         {
           label: zh ? '正文宽度' : 'Text Width',
@@ -203,6 +292,8 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
         { label: zh ? 'Markdown 语法' : 'Markdown Syntax', hint: 'Ctrl+Shift+/', run: () => void window.electronAPI?.openCheatsheet() },
         { label: zh ? '新功能演示' : "What's New", hint: 'Ctrl+Shift+D', run: () => void window.electronAPI?.openWhatsNew() },
         sep(zh ? '关于' : 'About'),
+        // 原生 帮助→关于 在非 macOS 上原本是 inert 的 role，现在两边都有真弹窗
+        { label: zh ? '关于 ColaMD CT…' : 'About ColaMD CT…', run: () => void window.electronAPI?.showAbout() },
         {
           label: zh ? 'ColaMD CT（项目主页）' : 'ColaMD CT (project page)',
           run: () => void window.electronAPI?.openExternal('https://github.com/fakerUNcode/colaMD-CT'),
@@ -273,10 +364,13 @@ function renderEntries(container: HTMLElement, entries: MenuEntry[], depth: numb
         divider.className = 'colamd-menu-divider'
         container.appendChild(divider)
       }
-      const head = document.createElement('div')
-      head.className = 'colamd-menu-section'
-      head.textContent = entry.section
-      container.appendChild(head)
+      // 空标题 = 只要那条分隔线（子菜单里的裸分隔线），不画小标题
+      if (entry.section) {
+        const head = document.createElement('div')
+        head.className = 'colamd-menu-section'
+        head.textContent = entry.section
+        container.appendChild(head)
+      }
       continue
     }
     const row = document.createElement('button')
@@ -302,13 +396,13 @@ function renderEntries(container: HTMLElement, entries: MenuEntry[], depth: numb
       arrow.textContent = '›'
       row.appendChild(arrow)
       // 二级条目可能是异步取的（最近打开）：取到后缓存，再次悬停即时展开
-      let cached: MenuItem[] | null = null
+      let cached: MenuEntry[] | null = null
       row.addEventListener('mouseenter', () => {
         closeFlyoutsFrom(depth)
         const flyout = document.createElement('div')
         flyout.className = 'colamd-menu colamd-menu-flyout'
         document.body.appendChild(flyout)
-        const place = (items: MenuItem[]): void => {
+        const place = (items: MenuEntry[]): void => {
           renderEntries(flyout, items, depth + 1)
           placeFlyout(flyout, row)
         }
@@ -397,6 +491,10 @@ export function toggleAppMenu(module?: MenuModule): void {
 
 /** 外壳接线：给每个模块按钮挂点击与悬停切换。 */
 export function bindModuleButtons(): void {
+  // 先热好两份异步缓存（自定义主题列表、「启动时打开上次文档」的勾选态），
+  // 用户第一次点开面板时同步渲染的就是真值
+  refreshCustomThemes()
+  void refreshRestoreOnLaunch()
   for (const entry of MENU_MODULES) {
     const button = moduleButton(entry.id)
     if (!button) continue

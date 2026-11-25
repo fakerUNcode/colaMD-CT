@@ -3,6 +3,7 @@ import { markdownForWord } from './editor/mermaid-export'
 import { withDiagramZoomPaused } from './editor/mermaid-bridge'
 import { jumpToSourceLine, sourcePositionTop } from './editor/source-line'
 import { EditorView } from '@codemirror/view'
+import { undo, redo } from '@codemirror/commands'
 import { documentHTMLFrom } from './editor/clean-html'
 import { isPresenting, startSlideshow, stopSlideshow } from './slideshow'
 import { enterPrintLayout, exitPrintLayout } from './slides-export'
@@ -17,7 +18,7 @@ import { loadTableWidthsFor, runTableMenuAction, setRememberTableWidths, type Ta
 import { applyImageMenuAction } from './editor/image-info'
 import { primeDialect, setDialectEffect } from './editor/live-preview'
 import { showPreferences } from './preferences'
-import { setupAppMenu, bindModuleButtons, MENU_MODULES } from './app-menu'
+import { setupAppMenu, bindModuleButtons, refreshCustomThemes, MENU_MODULES } from './app-menu'
 import { mergeAccelerators } from '../shared/commands'
 import type { AppSettings } from '../shared/settings-types'
 import './themes/base.css'
@@ -1921,21 +1922,64 @@ async function init(): Promise<void> {
   const searchPanel = new SearchPanel()
   searchPanel.setLanguage(language)
   api.onSearch(() => searchPanel.show())
+  // 查找三件套：菜单（编辑→查找下一个/上一个/替换）经这三条 channel 进来
+  api.onSearchNext(() => searchPanel.findNext())
+  api.onSearchPrev(() => searchPanel.findPrev())
+  api.onSearchReplace(() => searchPanel.showReplace())
   // Cmd/Ctrl+F 在页面这一层也接一次：菜单的快捷键是主路径（macOS 上由菜单先接走），
   // 但菜单被隐藏或平台不转发快捷键时，这个兜底能保证打开的仍是**我们自己的**面板，
   // 而不是 CodeMirror 自带那块只有英文的（它已经从编辑器扩展里摘掉了）。
   // Cmd/Ctrl+/ 同理接源码切换（CodeMirror 的注释绑定已摘掉）。页面 preventDefault 之后
   // 菜单的同名快捷键不会再触发；切换不是幂等的，两边都触发就等于没按。
+  // 查找家族的其余键位（2026-11-25，两平台齐全度对齐）：
+  //   F3 / Shift+F3        下一个 / 上一个（无修饰键，两平台一致）
+  //   Ctrl/Cmd+G（+Shift） 下一个 / 上一个（macOS 系统惯例；Windows 的 Ctrl+G 同义）
+  //   Ctrl+H               替换（Windows / Linux 惯例）
+  //   Cmd+Shift+F          替换（macOS：Cmd+Option+F 被「脚注」占用、Cmd+H 撞「隐藏窗口」）
+  const isMacPlatform = /^Mac/i.test(navigator.platform)
   document.addEventListener('keydown', (event) => {
-    if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return
-    if (event.key === '/') {
+    // F3 不带修饰键：输入类控件里不拦（改绑捕获层也不收裸键，这里同样放过）
+    if (event.key === 'F3' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      const target = event.target as HTMLElement | null
+      const inTextField = target instanceof HTMLElement
+        && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
+          || (target.isContentEditable && !target.closest('.cm-content')))
+      if (!inTextField) {
+        event.preventDefault()
+        if (event.shiftKey) searchPanel.findPrev()
+        else searchPanel.findNext()
+        return
+      }
+    }
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+    if (event.key === '/' && !event.shiftKey) {
       event.preventDefault()
       toggleSourceMode()
       return
     }
-    if (event.key.toLowerCase() !== 'f') return
-    event.preventDefault()
-    searchPanel.show()
+    const key = event.key.toLowerCase()
+    if (key === 'g') {
+      event.preventDefault()
+      if (event.shiftKey) searchPanel.findPrev()
+      else searchPanel.findNext()
+      return
+    }
+    if (key === 'f') {
+      if (event.shiftKey && isMacPlatform) {
+        // macOS 的替换键位（带 Shift 的 F）要在查找之前判
+        event.preventDefault()
+        searchPanel.showReplace()
+        return
+      }
+      if (event.shiftKey) return
+      event.preventDefault()
+      searchPanel.show()
+      return
+    }
+    if (key === 'h' && !event.shiftKey && !isMacPlatform) {
+      event.preventDefault()
+      searchPanel.showReplace()
+    }
   })
   api.onStepFont((delta) => {
     if (delta === 0) resetEditorFontSize()
@@ -1953,6 +1997,20 @@ async function init(): Promise<void> {
     else stepEditorFontSize(delta)
   })
   api.onFormatCommand((id) => runFormatCommand(id as FormatCommandId))
+  // 编辑模块的撤销/重做（editor:undo / editor:redo）：走 CodeMirror 的命令，与键盘
+  // （Ctrl+Z / Ctrl+Y）同一份历史；源码模式下退回 textarea 的原生撤销。
+  const runEditorHistory = (kind: 'undo' | 'redo'): void => {
+    const source = sourceEl()
+    if (source?.classList.contains('visible')) {
+      source.focus()
+      document.execCommand(kind)
+      return
+    }
+    const view = getEditorView()
+    if (view) void (kind === 'undo' ? undo(view) : redo(view))
+  }
+  api.onUndo(() => runEditorHistory('undo'))
+  api.onRedo(() => runEditorHistory('redo'))
   // --- ColaMD CT：快捷键 / 偏好设置 / 表格菜单 / 图片文档路径 / 方言 ---
   setImageDocPathProvider(() => currentFilePath)
   void initCommandKeymap()
@@ -2191,6 +2249,11 @@ async function init(): Promise<void> {
   // 的主题化面板；原生菜单仍注册着，快捷键照旧由它生效。
   setupAppMenu({
     theme: loadSavedTheme,
+    // 自定义主题：loadThemeCSS 拿样式后走 applyTheme——与原生菜单
+    // set-theme + set-custom-css 那一对同一条落点
+    customTheme: (file) => {
+      void api.loadThemeCSS(file).then((css) => applyTheme(`custom:${file}`, css ?? undefined))
+    },
     language: () => (isChinese() ? 'zh' : 'en'),
     preferences: () => showPreferences(),
   })
@@ -2227,6 +2290,8 @@ async function init(): Promise<void> {
   api.onMenuImportTheme(async () => {
     const result = await api.loadCustomTheme()
     if (result) applyTheme(`custom:${result.name}`, result.css)
+    // 模块菜单的「主题」子菜单要能看到新导入的主题
+    refreshCustomThemes()
   })
 
   // --- Auto update banner (weak, non-blocking) ---

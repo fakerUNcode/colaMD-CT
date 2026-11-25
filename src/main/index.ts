@@ -1492,9 +1492,13 @@ let currentPanelSide: 'left' | 'right' = 'right'
 let currentPageWidth: 'narrow' | 'standard' | 'wide' = 'standard'
 let themeMenuItems: Array<{ id: string; theme: string }> = []
 // Enumerate installed system font families for the font settings dialog (#7752855).
-// Uses NSFontManager via JXA — the same source as the macOS font panel — so the
-// list matches what the system and other apps (e.g. Typora) show, with
-// localized family names. Result is cached after the first load.
+//   macOS   NSFontManager via JXA — the same source as the macOS font panel — so the
+//           list matches what the system and other apps (e.g. Typora) show, with
+//           localized family names.
+//   Windows WPF's SystemFontFamilies via PowerShell — the registry's installed
+//           families with their proper names (the same list the system font pickers
+//           show). v2.7.23 及之前这里只有 macOS 有实现，Windows 的字体下拉一直是空的。
+//   Linux   fc-list. Result is cached after the first load on every platform.
 let systemFontFamilies: string[] | null = null
 let systemFontFamiliesPromise: Promise<string[]> | null = null
 
@@ -1502,31 +1506,51 @@ function loadSystemFontFamilies(): Promise<string[]> {
   if (systemFontFamilies) return Promise.resolve(systemFontFamilies)
   if (systemFontFamiliesPromise) return systemFontFamiliesPromise
   systemFontFamiliesPromise = new Promise((resolve) => {
-    if (process.platform !== 'darwin') {
-      resolve([])
-      return
-    }
-    const script = [
-      'ObjC.import("AppKit")',
-      'const nm = $.NSFontManager.sharedFontManager',
-      'const out = []',
-      'const fams = nm.availableFontFamilies.js',
-      'for (const f of fams) { out.push(nm.localizedNameForFamilyFace($(f), $()).js) }',
-      'out.join("\\n")'
-    ].join('; ')
-    execFile('osascript', ['-l', 'JavaScript', '-e', script], { maxBuffer: 4 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
+    // Windows/Linux 的列举输出一行可能带多个名字（WPF 的复合族、fc-list 的别名表），
+    // 按逗号再拆一层；macOS 的 NSFontManager 每行一个族名，不拆。
+    const finish = (stdout: string, splitCommas: boolean): void => {
       try {
-        if (err) {
-          console.error('[font-list] osascript failed:', (err as NodeJS.ErrnoException).message)
-          throw err
-        }
         const collator = new Intl.Collator(app.getLocale().startsWith('zh') ? 'zh-Hans' : 'en', { sensitivity: 'base', numeric: true })
-        systemFontFamilies = [...new Set(stdout.split('\n').map((s) => s.trim()).filter(Boolean))].sort(collator.compare)
+        const names = stdout.split('\n').flatMap((line) => (splitCommas ? line.split(',') : [line])).map((s) => s.trim()).filter(Boolean)
+        systemFontFamilies = [...new Set(names)].sort(collator.compare)
       } catch {
         systemFontFamilies = []
       }
       resolve(systemFontFamilies)
-    })
+    }
+    if (process.platform === 'darwin') {
+      const script = [
+        'ObjC.import("AppKit")',
+        'const nm = $.NSFontManager.sharedFontManager',
+        'const out = []',
+        'const fams = nm.availableFontFamilies.js',
+        'for (const f of fams) { out.push(nm.localizedNameForFamilyFace($(f), $()).js) }',
+        'out.join("\\n")'
+      ].join('; ')
+      execFile('osascript', ['-l', 'JavaScript', '-e', script], { maxBuffer: 4 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
+        if (err) console.error('[font-list] osascript failed:', (err as NodeJS.ErrnoException).message)
+        finish(err ? '' : stdout, false)
+      })
+      return
+    }
+    if (process.platform === 'win32') {
+      // 输出强制走 UTF-8：中文 Windows 的控制台代码页是 GBK，不设这个，
+      // 中文字体名会按 GBK 字节回来，execFile 再按 UTF-8 解就成了乱码
+      const script = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Add-Type -AssemblyName PresentationCore; [System.Windows.Media.Fonts]::SystemFontFamilies | ForEach-Object { $_.Source }'
+      execFile('powershell.exe', ['-NoProfile', '-Command', script], { maxBuffer: 4 * 1024 * 1024, timeout: 20000 }, (err, stdout) => {
+        if (err) console.error('[font-list] powershell failed:', (err as NodeJS.ErrnoException).message)
+        finish(err ? '' : stdout, true)
+      })
+      return
+    }
+    if (process.platform === 'linux') {
+      execFile('fc-list', [':', 'family'], { maxBuffer: 4 * 1024 * 1024, timeout: 15000 }, (err, stdout) => {
+        if (err) console.error('[font-list] fc-list failed:', (err as NodeJS.ErrnoException).message)
+        finish(err ? '' : stdout, true)
+      })
+      return
+    }
+    resolve([])
   })
   return systemFontFamiliesPromise
 }
@@ -1677,11 +1701,46 @@ ipcMain.handle('popup-app-menu', (event) => {
 })
 
 // ColaMD CT：主题化的应用菜单（渲染端 app-menu.ts）不走原生菜单，动作经这里
-// 转发到既有 channel（menu-save / toggle-source-mode / set-theme …），渲染端
-// 已有的 onMenuX 监听器原样复用，一套行为两条入口。
+// 转发到既有 channel（menu-save / toggle-source-mode / set-theme / open-font-settings …），
+// 渲染端已有的 onMenuX 监听器原样复用，一套行为两条入口。open- 前缀是 v2.7.24 加的
+// （编辑器字体 / 偏好设置两条 channel 原本只能从原生菜单触达）。
 ipcMain.handle('app-menu-action', (_event, channel: unknown, ...args: unknown[]) => {
-  if (typeof channel !== 'string' || !/^(?:menu-|editor:|toggle-|set-|step-)/.test(channel)) return
+  if (typeof channel !== 'string' || !/^(?:menu-|editor:|open-|toggle-|set-|step-)/.test(channel)) return
   sendToFocused(channel, ...args)
+})
+
+// ColaMD CT：模块菜单要触达、但活儿只能干在主进程的几件事（此前只有原生菜单能碰）。
+// 「清除最近记录」顺带重建菜单（clearRecentFiles 自己做），与原生菜单同一条路。
+ipcMain.handle('clear-recent-files', () => {
+  clearRecentFiles()
+})
+
+ipcMain.handle('export-slides-pdf', () => {
+  void exportSlidesPDF(getFocusedWindow() ?? BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed()) ?? null)
+})
+
+ipcMain.handle('show-about', () => {
+  void showAboutDialog()
+})
+
+// 编辑模块的剪贴板四件套：对发起的窗口执行浏览器原生编辑命令——和原生菜单里
+// role: cut/copy/paste/selectAll 走的是同一条底层路，焦点与选区不动（模块菜单不夺焦）。
+ipcMain.handle('edit-command', (event, command: unknown) => {
+  if (command !== 'cut' && command !== 'copy' && command !== 'paste' && command !== 'selectAll') return
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed()) return
+  if (command === 'selectAll') win.webContents.selectAll()
+  else if (command === 'cut') win.webContents.cut()
+  else if (command === 'copy') win.webContents.copy()
+  else win.webContents.paste()
+})
+
+ipcMain.handle('list-custom-themes', () => {
+  try {
+    return readdirSync(themesDir).filter((file: string) => file.endsWith('.css')).sort()
+  } catch {
+    return [] // themes 目录可能还不存在
+  }
 })
 
 ipcMain.handle('set-language', (_event, language: unknown) => {
@@ -1910,6 +1969,39 @@ function formatSubmenu(zh: boolean): Electron.MenuItemConstructorOptions[] {
   ]
 }
 
+// ColaMD CT：非 macOS 的「关于」弹窗。Electron 的 role:'about' 只在 macOS 有实际行为，
+// Windows/Linux 上那个菜单项按下去什么也不发生（v2.7.23 及之前一直是哑的）。
+async function showAboutDialog(): Promise<void> {
+  const choice = await dialog.showMessageBox({
+    type: 'info',
+    title: uiText('关于 ColaMD CT', 'About ColaMD CT'),
+    message: 'ColaMD CT',
+    detail: `${uiText('版本', 'Version')} ${app.getVersion()}\n\n${uiText('Typora 手感增强版 ColaMD。', 'A Typora-parity enhancement of ColaMD.')}`,
+    buttons: [uiText('项目主页', 'Project Page'), uiText('关闭', 'Close')],
+    defaultId: 1,
+    cancelId: 1,
+  })
+  if (choice.response === 0) void shell.openExternal('https://github.com/fakerUNcode/colaMD-CT')
+}
+
+// ColaMD CT：验收用的菜单快照——把 buildMenu 搭出的模板序列化成 label/accelerator/
+// role/是否有 click 的两层列表（只读、不带走行为）。verify:menu-parity 拿它对齐
+// 「原生菜单有的，Windows 模块菜单也要有」。
+export interface MenuSpecItem {
+  label: string
+  accelerator: string | null
+  role: string | null
+  hasClick: boolean
+  hasSubmenu: boolean
+}
+export interface MenuSpecEntry {
+  label: string
+  items: MenuSpecItem[]
+}
+let currentMenuSpec: MenuSpecEntry[] = []
+
+ipcMain.handle('ct-debug:menu-spec', () => currentMenuSpec)
+
 function buildMenu(): void {
   const isMac = process.platform === 'darwin'
 
@@ -1941,7 +2033,7 @@ function buildMenu(): void {
         newFile: '新建', open: '打开...', save: '保存', saveAs: '另存为...',
         newTab: '新建标签页', closeTab: '关闭标签页',
         recentOpen: '最近打开', restoreOnLaunch: '启动时打开上次文档', clearRecent: '清除最近记录', noRecent: '没有最近打开的文件',
-        exportPDF: '导出 PDF...', exportSlidesPDF: '导出幻灯片 PDF...', exportHTML: '导出 HTML...', exportWord: '导出 Word...', exportImageDesktop: '导出图片（电脑阅读）...', exportImageMobile: '导出图片（手机阅读）...', find: '查找',
+        exportPDF: '导出 PDF...', exportSlidesPDF: '导出幻灯片 PDF...', exportHTML: '导出 HTML...', exportWord: '导出 Word...', exportImageDesktop: '导出图片（电脑阅读）...', exportImageMobile: '导出图片（手机阅读）...', find: '查找', findNext: '查找下一个', findPrev: '查找上一个', replace: '替换',
         setDefault: '设置为默认应用...',
         filePanel: '显示 / 隐藏文件列表', sourceMode: '切换 Markdown 源码',
         panelSide: '文件列表位置', panelSideLeft: '在左侧', panelSideRight: '在右侧',
@@ -1963,7 +2055,7 @@ function buildMenu(): void {
         newFile: 'New', open: 'Open...', save: 'Save', saveAs: 'Save As...',
         newTab: 'New Tab', closeTab: 'Close Tab',
         recentOpen: 'Open Recent', restoreOnLaunch: 'Reopen last document at launch', clearRecent: 'Clear Recent', noRecent: 'No recent files',
-        exportPDF: 'Export PDF...', exportSlidesPDF: 'Export Slides PDF...', exportHTML: 'Export HTML...', exportWord: 'Export Word...', exportImageDesktop: 'Export Image (Desktop)...', exportImageMobile: 'Export Image (Mobile)...', find: 'Find',
+        exportPDF: 'Export PDF...', exportSlidesPDF: 'Export Slides PDF...', exportHTML: 'Export HTML...', exportWord: 'Export Word...', exportImageDesktop: 'Export Image (Desktop)...', exportImageMobile: 'Export Image (Mobile)...', find: 'Find', findNext: 'Find Next', findPrev: 'Find Previous', replace: 'Replace',
         setDefault: 'Set as Default...',
         filePanel: 'Show / Hide File List', sourceMode: 'Toggle Markdown Source',
         panelSide: 'File List Position', panelSideLeft: 'On the Left', panelSideRight: 'On the Right',
@@ -2148,6 +2240,24 @@ function buildMenu(): void {
           accelerator: 'CmdOrCtrl+F',
           click: () => sendToFocused('editor:search')
         },
+        // ColaMD CT：查找家族补全（Typora 同款）。macOS 用系统惯例（⌘G / ⇧⌘G / ⇧⌘F——
+        // ⌥⌘F 被「脚注」占着，⌘H 撞「隐藏窗口」）；Windows/Linux 用 F3 与 Ctrl+H。
+        // 渲染端 DOM 层有同键兜底并 preventDefault，菜单 accelerator 不双发。
+        {
+          label: labels.findNext,
+          accelerator: isMac ? 'Cmd+G' : 'F3',
+          click: () => sendToFocused('editor:search-next')
+        },
+        {
+          label: labels.findPrev,
+          accelerator: isMac ? 'Cmd+Shift+G' : 'Shift+F3',
+          click: () => sendToFocused('editor:search-prev')
+        },
+        {
+          label: labels.replace,
+          accelerator: isMac ? 'Cmd+Shift+F' : 'Ctrl+H',
+          click: () => sendToFocused('editor:search-replace')
+        },
         {
           // #58: discoverable format shortcuts; the menu is the documentation.
           // ColaMD CT：条目与快捷键都来自 src/shared/commands.ts + settings 的
@@ -2245,13 +2355,27 @@ function buildMenu(): void {
         // ColaMD CT: no update entry. This build has no publish feed (see
         // CT_UPDATES_DISABLED above); offering a check here would only fail.
         { type: 'separator' },
-        { label: labels.about, role: 'about' }
+        // role:'about' 在非 macOS 是哑的；那里换成自己的弹窗（showAboutDialog）
+        isMac ? { label: labels.about, role: 'about' } : { label: labels.about, click: () => void showAboutDialog() }
       ]
     }
   ]
 
   const menu = Menu.buildFromTemplate(template)
   Menu.setApplicationMenu(menu)
+  currentMenuSpec = template.map((top) => ({
+    label: top.label ?? '',
+    items: (Array.isArray((top as { submenu?: Electron.MenuItemConstructorOptions[] }).submenu)
+      ? (top as { submenu: Electron.MenuItemConstructorOptions[] }).submenu
+      : []
+    ).map((item) => ({
+      label: item.label ?? '',
+      accelerator: item.accelerator ?? null,
+      role: (item as { role?: Electron.MenuItemConstructorOptions['role'] }).role ?? null,
+      hasClick: typeof (item as { click?: unknown }).click === 'function',
+      hasSubmenu: Array.isArray((item as { submenu?: unknown }).submenu),
+    })),
+  }))
   localizeWindowMenu(menu, labels)
   themeMenuItems = [
     ...themeSubmenu.filter((item): item is Electron.MenuItemConstructorOptions & { id: string } => typeof item.id === 'string')

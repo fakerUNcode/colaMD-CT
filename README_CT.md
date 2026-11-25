@@ -58,17 +58,18 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 - **Windows**：写 HKCU 注册表（ProgId + Capabilities + RegisteredApplications），随后打开系统「默认应用」设置页——Win8 起不允许应用静默改默认，需最后点选一次（VSCode 同款做法）
 - **Linux**：`xdg-mime default`（deb/AppImage 安装的 desktop 文件）
 
-## Windows 应用菜单（v2.7.19：模块按钮）
+## Windows 应用菜单（模块按钮）
 
-标题栏左上角是**五个极简模块按钮**，各自一个图标，点一下在按钮正下方展开该模块的面板（主题化自绘，替代原生灰菜单）：
+标题栏左上角是**六个极简模块按钮**，各自一个图标，点一下在按钮正下方展开该模块的面板（主题化自绘，替代原生灰菜单）。条目集合与原生菜单（macOS 用户看到的那份）对齐——`npm run verify:menu-parity` 守着两份菜单不再漂移：
 
 | 模块 | 内容 |
 |---|---|
-| 文件 | 新建窗口 / 打开 / 最近打开 ▸ / 保存 / 另存为 / 标签页 / 导出 ▸ / 设为默认应用 |
-| **格式** | 加粗、斜体、下划线、行内代码、删除线、高亮、行内公式、上标、下标、脚注；标题 ▸（1-6 级 + 正文）；三种列表；引用、代码块、公式块——**选中文字后一下点击即生效** |
+| 文件 | 新建窗口 / 打开 / 最近打开 ▸（含清除最近记录）/ 启动时打开上次文档 / 保存 / 另存为 / 标签页 / 导出 ▸（PDF、HTML、Word、两种图片、幻灯片 PDF）/ 设为默认应用 |
+| **编辑**（v2.7.24 新增） | 撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / **查找 / 查找下一个 / 查找上一个 / 替换**——与 macOS 的「编辑」菜单一一对应；此前这些在 Windows 上没有可见入口 |
+| **格式** | 加粗、斜体、下划线、行内代码、删除线、高亮、行内公式、上标、下标、脚注；标题 ▸（1-6 级 + 正文 + 提升/降低级别）；三种列表；引用、代码块、公式块——**选中文字后一下点击即生效** |
 | 插入 | 链接、图片、表格、公式块、代码块、水平线、脚注 |
-| 视图 | 源码模式、文件列表；主题 ▸、正文宽度 ▸、界面语言 ▸；字号、全屏、幻灯片 |
-| 更多 | 偏好设置、Markdown 语法、新功能演示、项目主页 |
+| 视图 | 源码模式、文件列表、文件列表位置 ▸；编辑器字体…；主题 ▸（12 内置 + 自定义 + 导入）、正文宽度 ▸、界面语言 ▸；字号、全屏、幻灯片 |
+| 更多 | 偏好设置、Markdown 语法、新功能演示、关于 ColaMD CT…、项目主页 |
 
 - 面板开着时把鼠标划到另一个模块按钮上，直接切换到那一栏（菜单栏手感）；二级项悬停展开；`Esc` 或点外面收起
 - 菜单不夺焦点：选区保持，「选中一段 → 格式 → 加粗」成立
@@ -132,6 +133,15 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 - **快捷键改绑真的能用。** 偏好设置里的捕获此前丢了修饰键（按什么都提示「需含修饰键」）；纯 Alt 键位（`Alt+B`）此前被按键层放过；模块菜单的提示只读默认键位。现在三者接的是同一份实时键位，设置页和菜单用同一种写法显示。`verify:keybindings`（27 条）。
 - **大纲高亮跟着正文走。** 文档里有表格、代码块、图片、公式时高亮会差一到两节：标题位置改为量屏幕上的真实位置。`verify:outline`（带高块的长文，42 个滚动停靠点逐一对）。
 - **点公式落光标不再偶发跑偏。** 以前在 click 里按横向比例落位，可鼠标按下的瞬间浏览器先把原生光标放到了公式边上、公式退回源码，click 不再派发。现在在 mousedown 的捕获阶段就落位。`verify:math-click`（左右各 24 轮）。
+
+## 菜单、设置与快捷键的平台齐全度（v2.7.24）
+
+起因：macOS 菜单栏里的「编辑 → 查找」在 Windows 上找不到——Ctrl+F 一直能按，但没有菜单入口。根源是两套菜单各画各的：Windows 的模块面板是原生菜单的**子集且已漂移**。本轮把三个维度一次对齐：
+
+- **Windows 模块菜单补齐**：新增「编辑」模块（撤销/重做/剪切/复制/粘贴/全选 + 查找三件套；撤销/重做走 CodeMirror 命令，与键盘 `Ctrl+Z/Y` 同一份历史，剪贴板四件套由主进程对聚焦窗口执行浏览器原生编辑命令）；文件模块补 清除最近记录、启动时打开上次文档、导出幻灯片 PDF；格式→标题补 提升与降低标题级别；视图补 编辑器字体、文件列表位置、自定义主题列表 + 导入主题；更多补 关于。非 macOS 的 帮助→关于 也从哑的 role 换成真弹窗（版本号 + 项目主页）。
+- **查找家族快捷键补全（两平台都补）**：查找下一个 = `F3` 或 `Ctrl+G`（macOS `Cmd+G`），查找上一个 = `Shift+F3` 或 `Ctrl+Shift+G`（macOS `Cmd+Shift+G`），替换 = Windows/Linux `Ctrl+H`、macOS `Cmd+Shift+F`（Typora 的 `Cmd+Option+F` 被「脚注」占着，`Cmd+H` 撞系统「隐藏窗口」）。原生菜单与页面兜底层同键，DOM 层 preventDefault 之后菜单不双发；面板打开时焦点在输入框里，`F3` / `Ctrl+G` 由面板自己接。
+- **设置面板**：Windows / Linux 上「编辑器字体」的系统字体下拉此前一直是空的（枚举只实现了 macOS 的 NSFontManager）——现在 Windows 用 WPF SystemFontFamilies（PowerShell，输出强制 UTF-8 防中文乱码）、Linux 用 fc-list；macOS 上偏好设置与模块菜单提示此前把 `Cmd` 显示成 `Ctrl`，已修正。
+- `npm run verify:menu-parity`（44 条）：六个模块面板的条目齐全度（含二级面板）、原生菜单快照交叉断言（getMenuSpec）、查找三件套从菜单端到端、真实按键（F3 / G 家族 / Ctrl+H / Esc）、编辑模块的剪贴板与撤销、清除最近记录、启动开关翻转、Windows 字体枚举非空。
 
 ## 图片工作流
 
@@ -204,7 +214,7 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 | **Ctrl+V** 粘贴复制的文件 | 同上，插入文件链接 |
 | 拖 .md 到**正文以外**（文件面板、标题栏等） | 照旧「打开文档」 |
 
-## 快捷键（默认值，全部可在偏好设置改绑）
+## 快捷键（格式命令的默认值，全部可在偏好设置改绑；查找家族键位固定）
 
 | 命令                | Windows/Linux                                    | macOS                 |
 | ----------------- | ------------------------------------------------ | --------------------- |
@@ -219,6 +229,15 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 | 引用 / 代码块 / 公式块    | `Ctrl+Shift+Q` / `Ctrl+Shift+K` / `Ctrl+Shift+M` | `⇧⌘Q` / `⇧⌘K` / `⇧⌘M` |
 | 插入图片 / 插入表格 / 水平线 | Ctrl+Shift+I / Ctrl+Shift+T / Ctrl+Shift+-       | 同左（Cmd）               |
 | 偏好设置              | `Ctrl+,`                                         | Cmd+,                 |
+
+查找家族（v2.7.24，键位固定不进改绑表，Typora / 系统惯例）：
+
+| 命令       | Windows/Linux                          | macOS                     |
+| -------- | -------------------------------------- | ------------------------- |
+| 查找       | `Ctrl+F`                               | `Cmd+F`                   |
+| 查找下一个   | `F3` 或 `Ctrl+G`                       | `Cmd+G`                   |
+| 查找上一个   | `Shift+F3` 或 `Ctrl+Shift+G`           | `Cmd+Shift+G`             |
+| 替换       | `Ctrl+H`                               | `Cmd+Shift+F`              |
 
 改绑：**文件 → 偏好设置… → 快捷键**。点击按键条 → 按新组合；`Backspace` 解绑；`Esc` 取消；↺ 恢复单条默认；「全部恢复默认」一键还原。冲突键位红色高亮（按归一后的键比，`Shift+Alt+C` 与 `Alt+Shift+C` 算同一个）。保存后菜单 accelerator、模块菜单提示与键盘立即同步（含其它窗口）。
 
@@ -235,6 +254,8 @@ src/shared/commands.ts          命令注册表（菜单/键盘/偏好设置共�
 src/shared/settings-types.ts    设置类型
 src/main/settings.ts            userData/settings.json 读写
 src/main/image-upload.ts        图床上传 + 本地副本（主进程，零新依赖）
+src/renderer/app-menu.ts        标题栏模块菜单（Windows，六个模块，与原生菜单对齐）
+src/renderer/editor/search-panel.ts  检索面板（查找三件套 + F3 / G 家族）
 src/renderer/editor/image-input.ts   粘贴/拖拽接管、占位符两阶段插入、文件链接
 src/renderer/editor/image-info.ts    图片信息卡
 src/renderer/editor/table-ops.ts     表格模型、行列操作、渲染态单元格编辑、列宽拖拽
@@ -263,4 +284,5 @@ src/renderer/preferences.ts     偏好设置弹窗（按功能分区）
 11. **图片右键**（2.7.23）：右键图片 → 菜单 → 缩小，源码变成 `<img … width="…">`，重开文件宽度还在；恢复原始大小回到 `![图](…)`；复制图片后能粘进聊天窗口；复制图片地址是文件里写的原样；「在资源管理器中显示」定位到文件；网络图片「另存为」能存下来
 12. **Alt 键位**（2.7.23）：绑了 `Alt+B` 之类的键后按下去命令生效，松开 Alt 时**顶部不弹出原生菜单栏**
 13. **表格带格式的格子**（2.7.23）：点进 `**加粗**` 的格子再点别处，格式还在；在加粗里补字、删掉整个加粗词，源码相应变化且没有多余的 `****`
-14. 回归（一条一条跑，不要并行）：`verify:markdown`、`verify:source-mode`（198）、`verify:list`（43）、`verify:themes`、`verify:table-ops`（60）、`verify:syntax`（198）、`verify:reveal-search`（81）、`verify:commands`（26）、`verify:table-cells`（60）、`verify:image-menu`（24）、`verify:keybindings`（27）、`verify:outline`、`verify:math-click`
+14. **平台齐全度**（2.7.24）：Windows 上六个模块逐个点开过一遍；`Alt` 唤出的原生菜单栏观感不变；真 mac 包上偏好设置的快捷键显示 `Cmd`、`Cmd+G` / `Cmd+Shift+G` / `Cmd+Shift+F` 生效、帮助→关于 是系统关于面板
+15. 回归（一条一条跑，不要并行）：`verify:markdown`、`verify:source-mode`（198）、`verify:list`（43）、`verify:themes`、`verify:table-ops`（60）、`verify:syntax`（198）、`verify:reveal-search`（81）、`verify:commands`（26）、`verify:table-cells`（60）、`verify:image-menu`（24）、`verify:keybindings`（27）、`verify:outline`、`verify:math-click`、`verify:menu-parity`（44）

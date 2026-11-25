@@ -88,6 +88,20 @@ export class SearchPanel {
 
     this.input.addEventListener('input', () => this.search())
     this.input.addEventListener('keydown', (e) => {
+      // F3 / Ctrl+G（±Shift）在面板里也要能跳：容器的 keydown 会把非 Escape 键
+      // stopPropagation，document 层那套兜底（main.ts）到不了这里
+      if (e.key === 'F3' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        if (e.shiftKey) this.prev()
+        else this.next()
+        return
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'g') {
+        e.preventDefault()
+        if (e.shiftKey) this.prev()
+        else this.next()
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
         this.replaceAll()
@@ -150,6 +164,25 @@ export class SearchPanel {
     this.input.focus()
     this.input.select()
     if (this.input.value) this.search()
+  }
+
+  /** 菜单 / F3 / Ctrl+G 的入口：面板没开就先开（有查询词时定位首个匹配），开着就跳下一个。 */
+  findNext(): void {
+    if (!this.visible) this.show()
+    else this.next()
+  }
+
+  /** 同上，跳上一个。 */
+  findPrev(): void {
+    if (!this.visible) this.show()
+    else this.prev()
+  }
+
+  /** 替换入口（Ctrl+H / 菜单）：打开面板并聚焦替换框。 */
+  showReplace(): void {
+    this.show()
+    this.replaceInput.focus()
+    this.replaceInput.select()
   }
 
   hide(): void {
