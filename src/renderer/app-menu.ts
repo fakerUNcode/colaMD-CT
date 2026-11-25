@@ -74,9 +74,9 @@ let hooks: Hooks = { theme: () => 'elegant', customTheme: () => {}, language: ()
 
 /** 自定义主题文件名（含 .css），打开面板前预热、导入主题后刷新。 */
 let customThemeFiles: string[] = []
-/** 「启动时打开上次文档」的当前值：勾选态要在面板里如实显示，IPC 是异步的，
- * 所以在 bindModuleButtons 时先热好缓存，点过之后再本地翻转。 */
-let restoreOnLaunch = false
+/** 启动行为三选项（v2.7.25）的当前值：勾选态要在面板里如实显示，IPC 是异步的，
+ * 所以在 bindModuleButtons 时先热好缓存，点过之后本地同步。 */
+let startupMode: 'blank' | 'restore' | 'welcome' = 'blank'
 
 /** 外壳注册活状态（当前主题/语言）与本地动作。 */
 export function setupAppMenu(next: Hooks): void {
@@ -90,9 +90,10 @@ export function refreshCustomThemes(): void {
   })
 }
 
-async function refreshRestoreOnLaunch(): Promise<void> {
+async function refreshStartupMode(): Promise<void> {
   try {
-    restoreOnLaunch = (await window.electronAPI?.getRestoreOnLaunch()) === true
+    const mode = await window.electronAPI?.getStartupMode()
+    if (mode === 'blank' || mode === 'restore' || mode === 'welcome') startupMode = mode
   } catch { /* 读不到就维持现状 */ }
 }
 
@@ -146,13 +147,21 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
           },
         },
         {
-          // 与偏好设置「启动」区同一个开关（get/set-restore-on-launch 两条 IPC 复用）
-          label: zh ? '启动时打开上次文档' : 'Reopen Last Document at Launch',
-          checked: () => restoreOnLaunch,
-          run: () => {
-            restoreOnLaunch = !restoreOnLaunch
-            void window.electronAPI?.setRestoreOnLaunch(restoreOnLaunch)
-          },
+          // v2.7.25 三选项：与偏好设置「启动」区、原生 文件→启动时 子菜单同一份
+          //（get/set-startup-mode 两条 IPC，住 recent.json）
+          label: zh ? '启动时' : 'On Launch',
+          items: () => (['blank', 'restore', 'welcome'] as const).map((mode) => ({
+            label: mode === 'blank'
+              ? (zh ? '新建文件' : 'New Blank File')
+              : mode === 'restore'
+                ? (zh ? '打开上次会话的所有文件' : 'Reopen Tabs from Last Session')
+                : (zh ? '显示欢迎界面' : 'Show Welcome Screen'),
+            checked: () => startupMode === mode,
+            run: () => {
+              startupMode = mode
+              void window.electronAPI?.setStartupMode(mode)
+            },
+          })),
         },
         sep(zh ? '文档' : 'Document'),
         { label: zh ? '保存' : 'Save', hint: 'Ctrl+S', channel: 'menu-save' },
@@ -291,6 +300,8 @@ function moduleEntries(module: MenuModule, zh: boolean): MenuEntry[] {
         { label: zh ? '偏好设置…' : 'Preferences…', hint: 'Ctrl+,', run: () => hooks.preferences() },
         { label: zh ? 'Markdown 语法' : 'Markdown Syntax', hint: 'Ctrl+Shift+/', run: () => void window.electronAPI?.openCheatsheet() },
         { label: zh ? '新功能演示' : "What's New", hint: 'Ctrl+Shift+D', run: () => void window.electronAPI?.openWhatsNew() },
+        // v2.7.25：与原生 帮助→检查更新… 同一条路（手动检查立即出结果）
+        { label: zh ? '检查更新…' : 'Check for Updates…', run: () => void window.electronAPI?.checkForUpdates() },
         sep(zh ? '关于' : 'About'),
         // 原生 帮助→关于 在非 macOS 上原本是 inert 的 role，现在两边都有真弹窗
         { label: zh ? '关于 ColaMD CT…' : 'About ColaMD CT…', run: () => void window.electronAPI?.showAbout() },
@@ -491,10 +502,10 @@ export function toggleAppMenu(module?: MenuModule): void {
 
 /** 外壳接线：给每个模块按钮挂点击与悬停切换。 */
 export function bindModuleButtons(): void {
-  // 先热好两份异步缓存（自定义主题列表、「启动时打开上次文档」的勾选态），
+  // 先热好两份异步缓存（自定义主题列表、启动三选项的勾选态），
   // 用户第一次点开面板时同步渲染的就是真值
   refreshCustomThemes()
-  void refreshRestoreOnLaunch()
+  void refreshStartupMode()
   for (const entry of MENU_MODULES) {
     const button = moduleButton(entry.id)
     if (!button) continue

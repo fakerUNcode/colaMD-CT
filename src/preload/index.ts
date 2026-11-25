@@ -127,8 +127,14 @@ export interface ElectronAPI {
   saveTableWidths: (docPath: string | null, widths: Record<string, number[]>) => Promise<void>
   appMenuAction: (channel: string, ...args: unknown[]) => Promise<void>
   setLanguage: (language: 'zh' | 'en') => Promise<void>
-  getRestoreOnLaunch: () => Promise<boolean>
-  setRestoreOnLaunch: (enabled: boolean) => Promise<void>
+  /** v2.7.25：启动行为三选项（blank / restore / welcome，住 recent.json）。 */
+  getStartupMode: () => Promise<'blank' | 'restore' | 'welcome'>
+  setStartupMode: (mode: 'blank' | 'restore' | 'welcome') => Promise<void>
+  onShowWelcome: (callback: () => void) => void
+  /** 手动「检查更新…」（帮助菜单 / 模块菜单共用）。 */
+  checkForUpdates: () => Promise<void>
+  /** 验收专用：广播假的更新事件驱动横幅状态机。 */
+  ctDebugUpdateEvent: (kind: 'available' | 'progress' | 'downloaded' | 'error', value?: string | number) => Promise<void>
   getRecentFiles: () => Promise<string[]>
   clearRecentFiles: () => Promise<void>
   exportSlidesPdf: () => Promise<void>
@@ -366,9 +372,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setLanguage: (language: 'zh' | 'en') => {
     return ipcRenderer.invoke('set-language', language) as Promise<void>
   },
-  getRestoreOnLaunch: () => ipcRenderer.invoke('get-restore-on-launch') as Promise<boolean>,
-  setRestoreOnLaunch: (enabled: boolean) => {
-    return ipcRenderer.invoke('set-restore-on-launch', enabled) as Promise<void>
+  // ColaMD CT（v2.7.25）：启动三选项 + 欢迎界面 + 手动检查更新
+  getStartupMode: () => ipcRenderer.invoke('get-startup-mode') as Promise<'blank' | 'restore' | 'welcome'>,
+  setStartupMode: (mode: 'blank' | 'restore' | 'welcome') => {
+    return ipcRenderer.invoke('set-startup-mode', mode) as Promise<void>
+  },
+  onShowWelcome: (callback: () => void) => {
+    ipcRenderer.on('show-welcome', () => callback())
+  },
+  checkForUpdates: () => ipcRenderer.invoke('update-check') as Promise<void>,
+  ctDebugUpdateEvent: (kind: 'available' | 'progress' | 'downloaded' | 'error', value?: string | number) => {
+    return ipcRenderer.invoke('ct-debug:update-event', kind, value) as Promise<void>
   },
   getRecentFiles: () => ipcRenderer.invoke('get-recent-files') as Promise<string[]>,
   // ColaMD CT：模块菜单要触达、但活在主进程里的动作（v2.7.24 起对齐原生菜单的齐全度）

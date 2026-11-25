@@ -64,12 +64,12 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 
 | 模块 | 内容 |
 |---|---|
-| 文件 | 新建窗口 / 打开 / 最近打开 ▸（含清除最近记录）/ 启动时打开上次文档 / 保存 / 另存为 / 标签页 / 导出 ▸（PDF、HTML、Word、两种图片、幻灯片 PDF）/ 设为默认应用 |
+| 文件 | 新建窗口 / 打开 / 最近打开 ▸（含清除最近记录）/ 启动时 ▸（三选项）/ 保存 / 另存为 / 标签页 / 导出 ▸（PDF、HTML、Word、两种图片、幻灯片 PDF）/ 设为默认应用 |
 | **编辑**（v2.7.24 新增） | 撤销 / 重做 / 剪切 / 复制 / 粘贴 / 全选 / **查找 / 查找下一个 / 查找上一个 / 替换**——与 macOS 的「编辑」菜单一一对应；此前这些在 Windows 上没有可见入口 |
 | **格式** | 加粗、斜体、下划线、行内代码、删除线、高亮、行内公式、上标、下标、脚注；标题 ▸（1-6 级 + 正文 + 提升/降低级别）；三种列表；引用、代码块、公式块——**选中文字后一下点击即生效** |
 | 插入 | 链接、图片、表格、公式块、代码块、水平线、脚注 |
 | 视图 | 源码模式、文件列表、文件列表位置 ▸；编辑器字体…；主题 ▸（12 内置 + 自定义 + 导入）、正文宽度 ▸、界面语言 ▸；字号、全屏、幻灯片 |
-| 更多 | 偏好设置、Markdown 语法、新功能演示、关于 ColaMD CT…、项目主页 |
+| 更多 | 偏好设置、Markdown 语法、新功能演示、检查更新…（v2.7.25）、关于 ColaMD CT…、项目主页 |
 
 - 面板开着时把鼠标划到另一个模块按钮上，直接切换到那一栏（菜单栏手感）；二级项悬停展开；`Esc` 或点外面收起
 - 菜单不夺焦点：选区保持，「选中一段 → 格式 → 加粗」成立
@@ -141,7 +141,21 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 - **Windows 模块菜单补齐**：新增「编辑」模块（撤销/重做/剪切/复制/粘贴/全选 + 查找三件套；撤销/重做走 CodeMirror 命令，与键盘 `Ctrl+Z/Y` 同一份历史，剪贴板四件套由主进程对聚焦窗口执行浏览器原生编辑命令）；文件模块补 清除最近记录、启动时打开上次文档、导出幻灯片 PDF；格式→标题补 提升与降低标题级别；视图补 编辑器字体、文件列表位置、自定义主题列表 + 导入主题；更多补 关于。非 macOS 的 帮助→关于 也从哑的 role 换成真弹窗（版本号 + 项目主页）。
 - **查找家族快捷键补全（两平台都补）**：查找下一个 = `F3` 或 `Ctrl+G`（macOS `Cmd+G`），查找上一个 = `Shift+F3` 或 `Ctrl+Shift+G`（macOS `Cmd+Shift+G`），替换 = Windows/Linux `Ctrl+H`、macOS `Cmd+Shift+F`（Typora 的 `Cmd+Option+F` 被「脚注」占着，`Cmd+H` 撞系统「隐藏窗口」）。原生菜单与页面兜底层同键，DOM 层 preventDefault 之后菜单不双发；面板打开时焦点在输入框里，`F3` / `Ctrl+G` 由面板自己接。
 - **设置面板**：Windows / Linux 上「编辑器字体」的系统字体下拉此前一直是空的（枚举只实现了 macOS 的 NSFontManager）——现在 Windows 用 WPF SystemFontFamilies（PowerShell，输出强制 UTF-8 防中文乱码）、Linux 用 fc-list；macOS 上偏好设置与模块菜单提示此前把 `Cmd` 显示成 `Ctrl`，已修正。
-- `npm run verify:menu-parity`（44 条）：六个模块面板的条目齐全度（含二级面板）、原生菜单快照交叉断言（getMenuSpec）、查找三件套从菜单端到端、真实按键（F3 / G 家族 / Ctrl+H / Esc）、编辑模块的剪贴板与撤销、清除最近记录、启动开关翻转、Windows 字体枚举非空。
+- `npm run verify:menu-parity`（44 条）：六个模块面板的条目齐全度（含二级面板）、原生菜单快照交叉断言（getMenuSpec）、查找三件套从菜单端到端、真实按键（F3 / G 家族 / Ctrl+H / Esc）、编辑模块的剪贴板与撤销、清除最近记录、启动模式往返、Windows 字体枚举非空。
+
+## 应用内更新与启动行为（v2.7.25）
+
+**检查更新（一键傻瓜式）**：帮助菜单（Windows 还有「更多」模块）里的「检查更新…」——发现新版本即自动后台下载（安装包按平台/架构自动从**本仓库** Releases 选：Windows NSIS 差分增量、macOS zip、Linux AppImage），下载进度打在右下角横幅上，下完变成「重启安装」：点一下退出并静默装回原目录、装完自动启动。平时退出时若更新已下好也会顺手装上（autoInstallOnAppQuit）；后台另有每日一次的静默检查（update-check.json 节流）。早先 CT 禁用更新器是因为上游 feed 会拿官方版盖掉 CT——现在 feed 指向本仓库（electron-builder.yml 的 publish 块生成 app-update.yml，仓库是 PUBLIC 的，release workflow 一直在发 latest.yml / blockmap）。
+
+**启动行为三选项**（偏好设置 → 编辑器 → 启动时，或 文件菜单 → 启动时 ▸；住 recent.json，主进程建窗前读）：
+
+| 选项 | 行为 |
+|---|---|
+| 新建文件 | 空白文档 |
+| 打开上次会话的所有文件 | 上次关闭的窗口开着的全部文件按原顺序恢复成标签页（旧「启动时打开上次文档」开关自动迁移到这一档） |
+| 显示欢迎界面 | 居中欢迎卡：新建文档 / 打开文档… / 最近文档列表（点即开；Esc、点按钮或任意文件落进窗口即收起） |
+
+`npm run verify:startup-updates`（28 条）：三轮跨启动验证（保存 → 关窗 → 复用 profile 重启）会话恢复、欢迎界面与空白模式（ct-harness 新增 `reuse` / `noDoc` 两个启动位）；经 `ct-debug:update-event` 钩子驱动更新横幅状态机（发现 → 下载中 N% → 重启安装 → 失败重试 → 收起）；帮助 / 更多 / 文件菜单与偏好设置三处入口齐全。
 
 ## 图片工作流
 
@@ -285,4 +299,5 @@ src/renderer/preferences.ts     偏好设置弹窗（按功能分区）
 12. **Alt 键位**（2.7.23）：绑了 `Alt+B` 之类的键后按下去命令生效，松开 Alt 时**顶部不弹出原生菜单栏**
 13. **表格带格式的格子**（2.7.23）：点进 `**加粗**` 的格子再点别处，格式还在；在加粗里补字、删掉整个加粗词，源码相应变化且没有多余的 `****`
 14. **平台齐全度**（2.7.24）：Windows 上六个模块逐个点开过一遍；`Alt` 唤出的原生菜单栏观感不变；真 mac 包上偏好设置的快捷键显示 `Cmd`、`Cmd+G` / `Cmd+Shift+G` / `Cmd+Shift+F` 生效、帮助→关于 是系统关于面板
-15. 回归（一条一条跑，不要并行）：`verify:markdown`、`verify:source-mode`（198）、`verify:list`（43）、`verify:themes`、`verify:table-ops`（60）、`verify:syntax`（198）、`verify:reveal-search`（81）、`verify:commands`（26）、`verify:table-cells`（60）、`verify:image-menu`（24）、`verify:keybindings`（27）、`verify:outline`、`verify:math-click`、`verify:menu-parity`（44）
+15. **更新与启动**（2.7.25）：装好正式包后，等下一个版本发布时人工点一次 帮助→检查更新… 走完整链路（发现 → 自动下载 → 进度 → 重启安装 → 进新版）；三种启动模式各重启一次看观感（欢迎卡的最近文档、恢复会话的标签页顺序）
+16. 回归（一条一条跑，不要并行）：`verify:markdown`、`verify:source-mode`（198）、`verify:list`（43）、`verify:themes`、`verify:table-ops`（60）、`verify:syntax`（198）、`verify:reveal-search`（81）、`verify:commands`（26）、`verify:table-cells`（60）、`verify:image-menu`（24）、`verify:keybindings`（27）、`verify:outline`、`verify:math-click`、`verify:menu-parity`（44）、`verify:startup-updates`（28）

@@ -67,10 +67,10 @@ const labelsInclude = (labels, want) => {
     report.check('编辑模块：撤销/重做/剪贴板四件套/查找三件套齐全', verdict.ok, verdict.ok ? editLabels : `缺 ${JSON.stringify(verdict.missing)}：${editLabels}`)
     await closeModule(app, 'edit')
 
-    // 文件模块：启动开关、导出幻灯片 PDF（此前只有原生菜单有）
+    // 文件模块：启动三选项（v2.7.25）、导出幻灯片 PDF（此前只有原生菜单有）
     const fileLabels = await openModule(app, 'file')
-    verdict = labelsInclude(JSON.parse(fileLabels), ['启动时打开上次文档', '最近打开'])
-    report.check('文件模块：启动时打开上次文档 / 最近打开齐全', verdict.ok, verdict.ok ? fileLabels : `缺 ${JSON.stringify(verdict.missing)}`)
+    verdict = labelsInclude(JSON.parse(fileLabels), ['启动时', '最近打开'])
+    report.check('文件模块：启动时（三选项入口）/ 最近打开齐全', verdict.ok, verdict.ok ? fileLabels : `缺 ${JSON.stringify(verdict.missing)}`)
     await closeModule(app, 'file')
     const exportLabels = await hoverItem(app, 'file', '导出为…')
     verdict = labelsInclude(JSON.parse(exportLabels), ['PDF', 'HTML', 'Word', '图片（电脑阅读）', '图片（手机阅读）', '导出幻灯片 PDF…'])
@@ -100,10 +100,10 @@ const labelsInclude = (labels, want) => {
     verdict = labelsInclude(JSON.parse(positionLabels), ['在左侧', '在右侧'])
     report.check('视图模块：文件列表位置子菜单（在左侧/在右侧）', verdict.ok, verdict.ok ? positionLabels : `缺 ${JSON.stringify(verdict.missing)}`)
 
-    // 更多模块：关于（此前非 mac 的 role about 是哑的）
+    // 更多模块：关于（此前非 mac 的 role about 是哑的）+ 检查更新（v2.7.25）
     const moreLabels = await openModule(app, 'more')
-    verdict = labelsInclude(JSON.parse(moreLabels), ['偏好设置…', 'Markdown 语法', '新功能演示', '关于 ColaMD CT…', 'ColaMD CT（项目主页）'])
-    report.check('更多模块：关于 ColaMD CT…齐全', verdict.ok, verdict.ok ? moreLabels : `缺 ${JSON.stringify(verdict.missing)}`)
+    verdict = labelsInclude(JSON.parse(moreLabels), ['偏好设置…', 'Markdown 语法', '新功能演示', '检查更新…', '关于 ColaMD CT…', 'ColaMD CT（项目主页）'])
+    report.check('更多模块：检查更新… / 关于 ColaMD CT…齐全', verdict.ok, verdict.ok ? moreLabels : `缺 ${JSON.stringify(verdict.missing)}`)
     await closeModule(app, 'more')
 
     console.log('五、原生菜单快照（getMenuSpec）')
@@ -120,9 +120,10 @@ const labelsInclude = (labels, want) => {
     const about = itemOf(help, '关于 ColaMD CT')
     report.check('原生 帮助→关于 在非 macOS 是真条目（不再是哑的 role:about）', !!about && about.hasClick, JSON.stringify(about))
     const file = menuOf('文件')
-    // 原生菜单的标签用 ASCII 三个点（'导出 PDF...' 同款），模块菜单才是「…」
-    report.check('原生 文件 菜单：清除最近记录 / 启动时打开上次文档 / 导出幻灯片 PDF...',
-      !!itemOf(file, '清除最近记录') && !!itemOf(file, '启动时打开上次文档') && !!itemOf(file, '导出幻灯片 PDF...'))
+    // 原生菜单的标签用 ASCII 三个点（'导出 PDF...' 同款），模块菜单才是「…」；
+    // v2.7.25 起「启动时打开上次文档」布尔勾选换成了「启动时」三选项子菜单
+    report.check('原生 文件 菜单：清除最近记录 / 启动时（子菜单）/ 导出幻灯片 PDF...',
+      !!itemOf(file, '清除最近记录') && !!itemOf(file, '启动时') && !!itemOf(file, '导出幻灯片 PDF...'))
     report.check('原生 视图 菜单：编辑器字体… / 文件列表位置（对照，别删）',
       !!itemOf(menuOf('视图'), '编辑器字体…') && !!itemOf(menuOf('视图'), '文件列表位置'))
 
@@ -231,15 +232,15 @@ const labelsInclude = (labels, want) => {
     await app.ev(`(() => { const cancel = [...document.querySelectorAll('.font-modal .math-modal-btn')].find((button) => /取消|Cancel/.test(button.textContent)); if (cancel) cancel.click(); return true })()`)
     await sleep(200)
 
-    console.log('二（续）：启动开关与主题入口不误伤')
-    const restoreBefore = await app.ev(`window.electronAPI.getRestoreOnLaunch()`)
-    await clickItem(app, 'file', '启动时打开上次文档')
+    console.log('二（续）：启动三选项往返')
+    // v2.7.25：启动时 → 新建文件 / 打开上次会话的所有文件 / 显示欢迎界面（recent.json）
+    const before = await app.ev(`window.electronAPI.getStartupMode()`)
+    await app.ev(`window.electronAPI.setStartupMode('welcome')`)
     await sleep(300)
-    const restoreAfter = await app.ev(`window.electronAPI.getRestoreOnLaunch()`)
-    report.check('文件→启动时打开上次文档：开关翻转并持久化', restoreAfter === !restoreBefore, `${restoreBefore} → ${restoreAfter}`)
-    await clickItem(app, 'file', '启动时打开上次文档')
+    report.check('启动模式改成 welcome 后 getStartupMode 一致', (await app.ev(`window.electronAPI.getStartupMode()`)) === 'welcome', '')
+    await app.ev(`window.electronAPI.setStartupMode(${JSON.stringify(before)})`)
     await sleep(300)
-    report.check('再点一次：开关翻回去', (await app.ev(`window.electronAPI.getRestoreOnLaunch()`)) === restoreBefore, '')
+    report.check('改回原值（不弄脏测试 profile）', (await app.ev(`window.electronAPI.getStartupMode()`)) === before, `${before}`)
   } finally {
     app.stop()
   }

@@ -14,6 +14,9 @@ import { spawnSync } from 'node:child_process'
 
 const ROOT = join(homedir(), 'Library', 'Caches', 'colamd-verify')
 
+/** ct-harness 的「复用同一 profile 二次启动」要按同一布局定位目录（v2.7.25 会话恢复验收）。 */
+export const VERIFY_ROOT = ROOT
+
 function wipe(path) {
   try {
     rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 })

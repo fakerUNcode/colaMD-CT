@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { assertBuildFresh } from './build-freshness.mjs'
-import { stopVerifyApp, verifyWorkdir } from './verify-workdir.mjs'
+import { stopVerifyApp, verifyWorkdir, VERIFY_ROOT } from './verify-workdir.mjs'
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 /** CDP 的修饰键位。 */
@@ -87,25 +87,39 @@ export const VIEW = `(() => {
 
 /**
  * 启动真实应用。`settings` 非空时先把它写进 profile 的 settings.json（测「带着已有改绑启动」）。
+ * v2.7.25 起的两个可选位（默认都不开，行为与原来完全一致）：
+ *   - `reuse`：复用上一次同名启动的 profile（verifyWorkdir 每次都会擦目录，这里跳过），
+ *     用于测跨启动语义（会话恢复 / 欢迎界面）；首轮 launchApp 注册的退出清理仍然有效。
+ *   - `noDoc`：不带文件参数启动，让主进程走「启动模式」分支（默认 doc.md 会当命令行
+ *     文件直接打开，走不到那个分支）。
  * 返回常用操作；用完必须 `stop()`。
  */
 export async function launchApp(name, options = {}) {
   assertBuildFresh()
-  const { dir: WORK, udd } = verifyWorkdir(name)
+  let WORK
+  let udd
+  if (options.reuse) {
+    WORK = join(VERIFY_ROOT, name)
+    udd = join(WORK, 'udd-main')
+  } else {
+    ;({ dir: WORK, udd } = verifyWorkdir(name))
+  }
   if (options.settings) {
     mkdirSync(udd, { recursive: true })
     writeFileSync(join(udd, 'settings.json'), JSON.stringify(options.settings, null, 2), 'utf8')
   }
+  const fileArgs = options.noDoc ? [] : [join(WORK, 'doc.md')]
   const port = 9800 + Math.floor(Math.random() * 90)
-  const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'node_modules', 'electron', 'cli.js'), 'scripts/offscreen-window.cjs', join(WORK, 'doc.md'),
-    `--user-data-dir=${udd}`, `--remote-debugging-port=${port}`
+  const child = spawn(process.execPath, [join(import.meta.dirname, '..', 'node_modules', 'electron', 'cli.js'), 'scripts/offscreen-window.cjs',
+    ...fileArgs, `--user-data-dir=${udd}`, `--remote-debugging-port=${port}`
   ], { cwd: join(import.meta.dirname, '..'), stdio: 'ignore', detached: true })
   const stop = () => {
     stopVerifyApp(udd)
     try { process.kill(-child.pid) } catch { /* 已经退了 */ }
   }
 
-  writeFileSync(join(WORK, 'doc.md'), '占位\n', 'utf8')
+  // 复用 profile 时绝不能盖掉上一轮保存的内容；占位文档只属于全新一轮
+  if (!options.reuse) writeFileSync(join(WORK, 'doc.md'), '占位\n', 'utf8')
   const page = await waitTarget(port)
   const renderer = await connect(page.webSocketDebuggerUrl)
   const ev = (expression) => renderer.send('Runtime.evaluate', {
@@ -116,9 +130,15 @@ export async function launchApp(name, options = {}) {
   })
   try {
     for (let i = 0; i < 60; i++) { if (await ev(`!!${VIEW}`)) break; await sleep(250) }
-    for (let i = 0; i < 40; i++) {
-      if ((await ev(`${VIEW}.state.doc.toString()`)) === '占位\n') break
-      await sleep(250)
+    if (options.noDoc || options.reuse) {
+      // 不带占位文档启动：文档内容由启动分支决定（恢复的文件/欢迎层后面的空白
+      // 文档），这里只等渲染器就绪，不认「占位」二字
+      await sleep(1200)
+    } else {
+      for (let i = 0; i < 40; i++) {
+        if ((await ev(`${VIEW}.state.doc.toString()`)) === '占位\n') break
+        await sleep(250)
+      }
     }
     await renderer.send('Emulation.setFocusEmulationEnabled', { enabled: true })
     await renderer.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false })

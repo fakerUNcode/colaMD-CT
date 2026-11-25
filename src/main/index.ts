@@ -105,7 +105,13 @@ const hasCustomUserDataDir = process.argv.some((arg) => arg.startsWith('--user-d
 const recentStorePath = hasCustomUserDataDir
   ? join(app.getPath('userData'), 'recent.json')
   : join(app.getPath('home'), '.colamd', 'recent.json')
-let recentStore: { recent: string[]; restoreOnLaunch: boolean } = { recent: [], restoreOnLaunch: true }
+// startup = v2.7.25 的三选项（blank 新建 / restore 恢复上次会话 / welcome 欢迎页），
+// 住在 recent.json（启动分支在建窗之前要读它，这是主进程的地盘）。老用户迁移：
+// 没写 startup 的按旧布尔 restoreOnLaunch 推导（默认 true → restore）。
+// lastSessionTabs = 上次关闭的那个窗口打开过的全部文件（win.on('closed') 写入）。
+type StartupMode = 'blank' | 'restore' | 'welcome'
+let recentStore: { recent: string[]; restoreOnLaunch: boolean; startup?: StartupMode; lastSessionTabs?: string[] }
+  = { recent: [], restoreOnLaunch: true }
 const languagePreferencePath = join(app.getPath('userData'), 'language.json')
 
 // Window size, position and view zoom survive a restart. Having to resize and
@@ -199,7 +205,16 @@ try {
     recentStore.recent = parsed.recent.filter((p: unknown): p is string => typeof p === 'string')
   }
   if (typeof parsed.restoreOnLaunch === 'boolean') recentStore.restoreOnLaunch = parsed.restoreOnLaunch
+  if (parsed.startup === 'blank' || parsed.startup === 'restore' || parsed.startup === 'welcome') {
+    recentStore.startup = parsed.startup
+  }
+  if (Array.isArray(parsed.lastSessionTabs)) {
+    recentStore.lastSessionTabs = parsed.lastSessionTabs.filter((p: unknown): p is string => typeof p === 'string')
+  }
 } catch { /* first run or unreadable store */ }
+// 迁移：v2.7.24 及以前只有布尔「启动时打开上次文档」——开着的老用户进 restore，
+// 关着的进 blank；此后 restoreOnLaunch 字段只剩归档意义，读写都走 startup。
+if (!recentStore.startup) recentStore.startup = recentStore.restoreOnLaunch ? 'restore' : 'blank'
 
 function persistRecentStore(): void {
   try {
@@ -235,10 +250,16 @@ function clearRecentFiles(): void {
   buildMenu()
 }
 
-function setRestoreOnLaunch(enabled: boolean): void {
-  recentStore.restoreOnLaunch = enabled
+function setStartupMode(mode: StartupMode): void {
+  recentStore.startup = mode
   persistRecentStore()
   buildMenu()
+}
+
+/** 上次关闭的窗口打开过的全部文件（v2.7.25 会话恢复）。 */
+function persistLastSession(tabFiles: string[]): void {
+  recentStore.lastSessionTabs = tabFiles.filter((p) => typeof p === 'string' && p.length > 0)
+  persistRecentStore()
 }
 
 async function scanCustomThemes(): Promise<string[]> {
@@ -301,6 +322,9 @@ interface PendingDocumentStateRequest {
 const windowStates = new Map<number, WindowState>()
 let pendingFilePaths: string[] = []
 let isQuitting = false
+// v2.7.25 启动模式选「显示欢迎界面」时的启动窗口：renderer-ready 一到就给它发
+// show-welcome，随后清空（只有启动窗口弹，之后建的新窗不弹）。
+let pendingWelcomeWindow: BrowserWindow | null = null
 let nextDocumentStateRequestId = 0
 const pendingDocumentStateRequests = new Map<string, PendingDocumentStateRequest>()
 
@@ -472,6 +496,10 @@ function createWindow(
   })
 
   win.on('closed', () => {
+    // 会话恢复（v2.7.25）：记下这个窗口关掉时开着哪些文件。tabFiles 由渲染端
+    // renderTabBar 实时上报（set-tab-files），含活动标签。多窗口时最后关的窗口
+    // 生效；全是未命名标签 → 空列表 → restore 模式退回空白文档。state 删除前取。
+    persistLastSession(state.tabFiles)
     stopWatching(state)
     windowStates.delete(win.id)
     fullScreenBeforeSlideshow.delete(win.id)
@@ -2032,7 +2060,8 @@ function buildMenu(): void {
         file: '文件', edit: '编辑', view: '视图', theme: '主题', window: '窗口', help: '帮助',
         newFile: '新建', open: '打开...', save: '保存', saveAs: '另存为...',
         newTab: '新建标签页', closeTab: '关闭标签页',
-        recentOpen: '最近打开', restoreOnLaunch: '启动时打开上次文档', clearRecent: '清除最近记录', noRecent: '没有最近打开的文件',
+        recentOpen: '最近打开', clearRecent: '清除最近记录', noRecent: '没有最近打开的文件',
+        startup: '启动时', startupBlank: '新建文件', startupRestore: '打开上次会话的所有文件', startupWelcome: '显示欢迎界面',
         exportPDF: '导出 PDF...', exportSlidesPDF: '导出幻灯片 PDF...', exportHTML: '导出 HTML...', exportWord: '导出 Word...', exportImageDesktop: '导出图片（电脑阅读）...', exportImageMobile: '导出图片（手机阅读）...', find: '查找', findNext: '查找下一个', findPrev: '查找上一个', replace: '替换',
         setDefault: '设置为默认应用...',
         filePanel: '显示 / 隐藏文件列表', sourceMode: '切换 Markdown 源码',
@@ -2054,7 +2083,8 @@ function buildMenu(): void {
         file: 'File', edit: 'Edit', view: 'View', theme: 'Theme', window: 'Window', help: 'Help',
         newFile: 'New', open: 'Open...', save: 'Save', saveAs: 'Save As...',
         newTab: 'New Tab', closeTab: 'Close Tab',
-        recentOpen: 'Open Recent', restoreOnLaunch: 'Reopen last document at launch', clearRecent: 'Clear Recent', noRecent: 'No recent files',
+        recentOpen: 'Open Recent', clearRecent: 'Clear Recent', noRecent: 'No recent files',
+        startup: 'On Launch', startupBlank: 'New Blank File', startupRestore: 'Reopen Tabs from Last Session', startupWelcome: 'Show Welcome Screen',
         exportPDF: 'Export PDF...', exportSlidesPDF: 'Export Slides PDF...', exportHTML: 'Export HTML...', exportWord: 'Export Word...', exportImageDesktop: 'Export Image (Desktop)...', exportImageMobile: 'Export Image (Mobile)...', find: 'Find', findNext: 'Find Next', findPrev: 'Find Previous', replace: 'Replace',
         setDefault: 'Set as Default...',
         filePanel: 'Show / Hide File List', sourceMode: 'Toggle Markdown Source',
@@ -2148,10 +2178,14 @@ function buildMenu(): void {
             : [{ label: labels.noRecent, enabled: false }]
         },
         {
-          label: labels.restoreOnLaunch,
-          type: 'checkbox' as const,
-          checked: recentStore.restoreOnLaunch,
-          click: () => setRestoreOnLaunch(!recentStore.restoreOnLaunch)
+          // v2.7.25 三选项：替换原来的布尔勾选（老配置载入时已迁移进 startup）
+          label: labels.startup,
+          submenu: (['blank', 'restore', 'welcome'] as const).map((mode) => ({
+            label: mode === 'blank' ? labels.startupBlank : mode === 'restore' ? labels.startupRestore : labels.startupWelcome,
+            type: 'checkbox' as const,
+            checked: (recentStore.startup ?? 'blank') === mode,
+            click: () => setStartupMode(mode),
+          })),
         },
         {
           label: labels.clearRecent,
@@ -2352,8 +2386,12 @@ function buildMenu(): void {
           accelerator: 'CmdOrCtrl+Shift+/',
           click: () => { void openCheatsheet(preferredCheatsheetLanguage) }
         },
-        // ColaMD CT: no update entry. This build has no publish feed (see
-        // CT_UPDATES_DISABLED above); offering a check here would only fail.
+        // ColaMD CT：v2.7.25 起恢复检查更新（feed 指向本仓库自己的 Releases）。
+        // 手动检查立即出结果；后台另有每日一次的自动检查（update-check.json 节流）。
+        {
+          label: labels.checkForUpdates,
+          click: () => void checkForUpdates(true)
+        },
         { type: 'separator' },
         // role:'about' 在非 macOS 是哑的；那里换成自己的弹窗（showAboutDialog）
         isMac ? { label: labels.about, role: 'about' } : { label: labels.about, click: () => void showAboutDialog() }
@@ -2434,11 +2472,13 @@ function updatePageWidthMenuChecks(): void {
 
 // --- Auto update (weak, non-blocking) ---
 
-// ColaMD CT: the in-app updater is disabled on purpose. Upstream ColaMD ships a
-// publish feed pointing at github.com/marswaveai/ColaMD; letting this build
-// auto-update from it would silently replace the CT enhancements with the
-// official build. Rebuild from source to update CT.
-const CT_UPDATES_DISABLED = true
+// ColaMD CT：v2.7.25 起更新器指向**本仓库**的 GitHub Releases（electron-builder.yml
+// 的 publish 块生成 app-update.yml，仓库是 PUBLIC 的，release workflow 一直在发
+// latest.yml / blockmap）。早先禁用它是因为上游的 feed 指向官方仓库、会拿官方
+// 版本盖掉 CT——现在源是自己的，放心开。行为：发现新版本即后台自动下载
+// （autoDownload），下载进度打到窗口横幅；下完一键「重启安装」走 NSIS 静默装
+// （quitAndInstall(true, true)）；平时退出时 autoInstallOnAppQuit 也会把已下载的
+// 更新装上。更新检查每天一次（手动检查不受限），外加 30 分钟的常开窗口轮询。
 
 let manualUpdateCheck = false
 let updateDownloadRequested = false
@@ -2472,7 +2512,6 @@ function showUpdateMessage(options: Electron.MessageBoxOptions): Promise<Electro
 }
 
 async function checkForUpdates(manual = false): Promise<void> {
-  if (CT_UPDATES_DISABLED) return
   if (!app.isPackaged) return
   // Once a day, not once a launch: the check is a request for a small manifest,
   // and five launches in a day meant five identical requests for the same answer
@@ -2499,21 +2538,21 @@ async function checkForUpdates(manual = false): Promise<void> {
 }
 
 function setupAutoUpdater(): void {
-  if (CT_UPDATES_DISABLED) return
   if (!app.isPackaged) return
 
-  autoUpdater.autoDownload = false
+  // 发现新版本就开始下（傻瓜式：不用等用户再点一次「更新」）；平时退出时若已
+  // 下完则顺手装上。手动横幅上的「重试」按钮仍走 download-update。
+  autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
 
-  const broadcast = (channel: string, version: string): void => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.isDestroyed()) win.webContents.send(channel, version)
-    }
-  }
+  const broadcast = broadcastToWindows
 
   autoUpdater.on('update-available', (info) => {
     manualUpdateCheck = false
     latestVersion = info.version
+    // 自动下载随即开始：把「有下载在途」立起来，进度与失败才会广播到横幅
+    // （这两个事件只认这个标志，原本只覆盖手动下载）。
+    updateDownloadRequested = true
     buildMenu()
     broadcast('update-available', info.version)
   })
@@ -2524,7 +2563,7 @@ function setupAutoUpdater(): void {
     void showUpdateMessage({
       type: 'info',
       buttons: [chinese ? '好' : 'OK'],
-      message: chinese ? 'ColaMD 已是最新版本' : 'ColaMD is up to date',
+      message: chinese ? 'ColaMD CT 已是最新版本' : 'ColaMD CT is up to date',
       detail: chinese ? `当前版本：v${app.getVersion()}` : `Current version: v${app.getVersion()}`
     })
   })
@@ -2559,15 +2598,40 @@ function setupAutoUpdater(): void {
   dailyTick.unref()
 }
 
+// 手动「检查更新…」（帮助菜单 / Windows 模块菜单）。未打包的开发环境里直接
+// 静默返回——本地没有 app-update.yml，检查只会报错。
+ipcMain.handle('update-check', () => {
+  void checkForUpdates(true)
+})
+
+/** 把更新事件发给每个活着的窗口（setupAutoUpdater 的事件与验收调试钩子共用）。 */
+function broadcastToWindows(channel: string, value: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, value)
+  }
+}
+
 ipcMain.handle('download-update', async () => {
-  if (CT_UPDATES_DISABLED) return
+  if (!app.isPackaged) return
   updateDownloadRequested = true
   await autoUpdater.downloadUpdate()
 })
 
 ipcMain.handle('install-update', () => {
-  if (CT_UPDATES_DISABLED) return
-  autoUpdater.quitAndInstall(false, true)
+  if (!app.isPackaged) return
+  // 静默装 + 装完自动启动（oneClick:false 的 assisted 安装器带 /S 装回原目录，
+  // 不再弹安装向导——「一键重启」就是字面意思）。
+  autoUpdater.quitAndInstall(true, true)
+})
+
+// 验收专用：把 autoUpdater 的事件用同样的 channel 广播出去（无头环境没有真
+// feed，横幅 UI 的状态机靠这个驱动）。只发事件，不碰更新器本体。
+ipcMain.handle('ct-debug:update-event', (_event, kind: unknown, value: unknown) => {
+  const version = typeof value === 'string' ? value : ''
+  if (kind === 'available') broadcastToWindows('update-available', version || '9.9.9')
+  else if (kind === 'progress') broadcastToWindows('update-progress', String(Math.min(100, Math.max(0, Number(value) || 0))))
+  else if (kind === 'downloaded') broadcastToWindows('update-downloaded', version || '9.9.9')
+  else if (kind === 'error') broadcastToWindows('update-error', '')
 })
 
 // App lifecycle
@@ -2626,16 +2690,21 @@ app.whenReady().then(() => {
     const firstWindow = createWindow(first)
     for (const fp of rest) openFileAsTab(firstWindow, fp)
     pendingFilePaths = []
+  } else if (recentStore.startup === 'restore' && (recentStore.lastSessionTabs ?? []).some((p) => existsSync(p))) {
+    // v2.7.25 会话恢复：上次关闭的那个窗口开着哪些文件，这次全开回来——形状与
+    // 多文件命令行启动相同（首个文件建窗，其余排成它的标签页）。
+    const files = (recentStore.lastSessionTabs ?? []).filter((p) => existsSync(p))
+    const [first, ...rest] = files
+    const sessionWindow = createWindow(first)
+    for (const fp of rest) openFileAsTab(sessionWindow, fp)
+  } else if (recentStore.startup === 'welcome') {
+    // 欢迎界面：先建空白窗，等渲染端就绪再让它弹欢迎层（只有启动窗口弹；
+    // activate / second-instance 建的新窗不弹）。
+    pendingWelcomeWindow = createWindow()
   } else {
     // Start with an empty editor and no directory scan. Bundled examples stay
     // available from Help and are loaded only when explicitly requested.
-    // With session restore on, reopen the most recent document instead (#45).
-    const lastDoc = recentStore.restoreOnLaunch ? recentStore.recent.find((p) => existsSync(p)) : undefined
-    if (lastDoc) {
-      createWindow(lastDoc)
-    } else {
-      createWindow()
-    }
+    createWindow()
   }
 
   setupAutoUpdater()
@@ -2692,6 +2761,11 @@ ipcMain.on('renderer-ready', (event) => {
     // Files queued before the renderer could listen (multi-file launch, early
     // second-instance) go out now.
     flushPendingTabFiles(win)
+    // 启动模式选了「显示欢迎界面」的那个启动窗口：现在渲染端能收了，让它弹。
+    if (pendingWelcomeWindow && win === pendingWelcomeWindow) {
+      pendingWelcomeWindow = null
+      if (!win.isDestroyed()) win.webContents.send('show-welcome')
+    }
   }
   markStartup('renderer-ready')
   writeStartupTrace()
@@ -2722,10 +2796,11 @@ ipcMain.handle('log-renderer-error', (_event, message: string) => {
 
 ipcMain.handle('settings:get', () => getSettings())
 
-// 启动时恢复上次文档住 recent.json（主进程的地盘），偏好设置要能读能写
-ipcMain.handle('get-restore-on-launch', () => recentStore.restoreOnLaunch)
-ipcMain.handle('set-restore-on-launch', (_event, enabled: unknown) => {
-  if (typeof enabled === 'boolean') setRestoreOnLaunch(enabled)
+// 启动行为三选项（v2.7.25）住 recent.json（主进程的地盘——启动分支在建窗之前
+// 就要读），偏好设置和两边菜单要能读能写。老的 get/set-restore-on-launch 至此退役。
+ipcMain.handle('get-startup-mode', (): StartupMode => recentStore.startup ?? 'blank')
+ipcMain.handle('set-startup-mode', (_event, mode: unknown) => {
+  if (mode === 'blank' || mode === 'restore' || mode === 'welcome') setStartupMode(mode)
 })
 
 // 标题栏模块菜单（渲染端 app-menu.ts）需要的三个主进程动作

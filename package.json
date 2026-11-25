@@ -1,6 +1,6 @@
 {
   "name": "colamd-ct",
-  "version": "2.7.24",
+  "version": "2.7.25",
   "description": "ColaMD CT - ColaMD with Typora-grade image workflow, table editing and full keyboard shortcuts. Based on ColaMD (MIT) by marswave.ai.",
   "main": "dist/main/index.js",
   "author": {
@@ -43,6 +43,7 @@
     "verify:commands": "node scripts/verify-commands.mjs",
     "verify:keybindings": "node scripts/verify-keybindings.mjs",
     "verify:menu-parity": "node scripts/verify-menu-parity.mjs",
+    "verify:startup-updates": "node scripts/verify-startup-updates.mjs",
     "verify:table-cells": "node scripts/verify-table-cells.mjs",
     "verify:image-menu": "node scripts/verify-image-menu.mjs",
     "verify:outline": "node scripts/verify-outline.mjs",

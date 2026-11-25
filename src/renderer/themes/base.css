@@ -1304,6 +1304,133 @@ body.web-playground *::-webkit-scrollbar-corner {
   color: var(--text-color);
 }
 
+/* ===== 欢迎界面（v2.7.25，启动模式 startup = 'welcome'） =====
+   压在编辑区上的一层半透明遮罩 + 居中卡片：新建 / 打开 / 最近文档。
+   配色全走主题变量，随主题切换；presentation 模式下与更新横幅一起藏起来。 */
+#welcome-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-color) 72%, transparent);
+  backdrop-filter: blur(2px);
+  z-index: 60;
+}
+
+#welcome-screen[hidden] {
+  display: none;
+}
+
+.welcome-card {
+  width: min(520px, 86%);
+  padding: 34px 36px 26px;
+  border-radius: 12px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  color: var(--text-color);
+  text-align: center;
+}
+
+.welcome-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.welcome-subtitle {
+  margin: 6px 0 22px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.welcome-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.welcome-actions button {
+  border: none;
+  border-radius: 7px;
+  padding: 8px 22px;
+  font-size: 13.5px;
+  cursor: pointer;
+  background: var(--link-color);
+  color: #fff;
+}
+
+.welcome-actions button:hover {
+  opacity: 0.92;
+}
+
+.welcome-actions #welcome-open-btn {
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+}
+
+.welcome-recent {
+  margin-top: 22px;
+  text-align: left;
+}
+
+.welcome-recent-title {
+  padding: 0 4px 6px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+#welcome-recent-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  max-height: 232px;
+  overflow-y: auto;
+}
+
+.welcome-recent-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.welcome-recent-item:hover,
+.welcome-recent-item:focus-visible {
+  background: color-mix(in srgb, var(--text-color) 8%, transparent);
+}
+
+.welcome-recent-item span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.welcome-recent-dir {
+  flex: none;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.welcome-recent-empty {
+  padding: 12px 6px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: center;
+}
+
 /* ===== Editor font preferences (#7752855) =====
    User preference > theme > built-in defaults. Only the editor prose and the
    source editor are overridden; code blocks keep the theme's code font. */
@@ -1435,6 +1562,7 @@ body.presenting #panel-resizer,
 body.presenting #source-editor,
 body.presenting #hover-tip,
 body.presenting #update-banner,
+body.presenting #welcome-screen,
 body.presenting #editor .code-copy-btn,
 body.presenting #editor > .footnote-preview {
   display: none !important;

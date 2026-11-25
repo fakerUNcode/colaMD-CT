@@ -43,6 +43,7 @@ const saveStatusEl = () => document.getElementById('save-status') as HTMLElement
 const updateBannerEl = () => document.getElementById('update-banner') as HTMLElement
 const updateBannerTextEl = () => document.getElementById('update-banner-text') as HTMLElement
 const updateBannerActionEl = () => document.getElementById('update-banner-action') as HTMLButtonElement
+const welcomeEl = () => document.getElementById('welcome-screen') as HTMLElement
 
 // --- Same-directory file panel ---
 let currentFilePath: string | null = null
@@ -1926,6 +1927,80 @@ async function init(): Promise<void> {
   api.onSearchNext(() => searchPanel.findNext())
   api.onSearchPrev(() => searchPanel.findPrev())
   api.onSearchReplace(() => searchPanel.showReplace())
+
+  // --- 欢迎界面（启动模式 startup = 'welcome'，v2.7.25） ---
+  // 主进程在 renderer-ready 后发 show-welcome（只有启动窗口）。任何文件落进
+  // 窗口、点「新建文档」「打开文档…」或按 Esc 都收起；欢迎层压在空白文档上，
+  // 收起即直接编辑。
+  let welcomeVisible = false
+  const hideWelcomeScreen = (): void => {
+    if (!welcomeVisible) return
+    welcomeVisible = false
+    welcomeEl().hidden = true
+  }
+  const showWelcomeScreen = (): void => {
+    welcomeVisible = true
+    welcomeEl().hidden = false
+    const zh = isChinese()
+    const card = welcomeEl().querySelector('.welcome-card') as HTMLElement
+    card.querySelector('.welcome-title')!.textContent = zh ? '欢迎使用 ColaMD CT' : 'Welcome to ColaMD CT'
+    card.querySelector('.welcome-subtitle')!.textContent = zh ? 'Typora 手感增强版 Markdown 编辑器' : 'A Typora-parity Markdown editor'
+    card.querySelector('.welcome-recent-title')!.textContent = zh ? '最近的文档' : 'Recent Documents'
+    const newBtn = document.getElementById('welcome-new-btn') as HTMLButtonElement
+    const openBtn = document.getElementById('welcome-open-btn') as HTMLButtonElement
+    newBtn.textContent = zh ? '新建文档' : 'New Document'
+    openBtn.textContent = zh ? '打开文档…' : 'Open Document…'
+    newBtn.focus()
+    // 最近文档：名字做主文字，所在目录做暗色提示（与模块菜单「最近打开」同款）
+    void api.getRecentFiles().then((files) => {
+      const list = document.getElementById('welcome-recent-list') as HTMLUListElement
+      list.replaceChildren()
+      if (files.length === 0) {
+        const li = document.createElement('li')
+        li.className = 'welcome-recent-empty'
+        li.textContent = zh ? '还没有最近的文档' : 'No recent documents yet'
+        list.appendChild(li)
+        return
+      }
+      for (const path of files.slice(0, 8)) {
+        const li = document.createElement('li')
+        li.className = 'welcome-recent-item'
+        li.tabIndex = 0
+        const name = document.createElement('span')
+        name.textContent = path.replace(/^.*[\\/]/, '')
+        const dir = document.createElement('span')
+        dir.className = 'welcome-recent-dir'
+        dir.textContent = path.replace(/[\\/][^\\/]*$/, '')
+        li.append(name, dir)
+        li.addEventListener('click', () => {
+          hideWelcomeScreen()
+          void api.openFilePath(path)
+        })
+        li.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return
+          event.preventDefault()
+          hideWelcomeScreen()
+          void api.openFilePath(path)
+        })
+        list.appendChild(li)
+      }
+    })
+  }
+  api.onShowWelcome(() => showWelcomeScreen())
+  document.getElementById('welcome-new-btn')!.addEventListener('click', () => {
+    hideWelcomeScreen()
+    focusEditor()
+  })
+  document.getElementById('welcome-open-btn')!.addEventListener('click', () => {
+    hideWelcomeScreen()
+    void api.appMenuAction('menu-open')
+  })
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !welcomeVisible) return
+    event.preventDefault()
+    hideWelcomeScreen()
+    focusEditor()
+  }, true)
   // Cmd/Ctrl+F 在页面这一层也接一次：菜单的快捷键是主路径（macOS 上由菜单先接走），
   // 但菜单被隐藏或平台不转发快捷键时，这个兜底能保证打开的仍是**我们自己的**面板，
   // 而不是 CodeMirror 自带那块只有英文的（它已经从编辑器扩展里摘掉了）。
@@ -2177,6 +2252,7 @@ async function init(): Promise<void> {
   api.onMenuPlaySlideshow(() => { void toggleSlideshow() })
 
   api.onNewFile(() => {
+    hideWelcomeScreen()
     exitSourceMode()
     ensureTab()
     applyContent('')
@@ -2186,6 +2262,7 @@ async function init(): Promise<void> {
   api.onFileOpened((data) => {
     // A document opened into a window that has none yet (a launch with a file)
     // lands in the first tab rather than creating a second one.
+    hideWelcomeScreen()
     ensureTab()
     currentFilePath = data.path
     applyDocumentFileUrl(data.fileUrl ?? null)
@@ -2300,7 +2377,8 @@ async function init(): Promise<void> {
   const UPDATE_NOTES: Record<string, { zh: string; en: string }> = {
     '2.7.0': { zh: '这次换了编辑器内核', en: 'new editor core' },
     '2.7.1-beta.1': { zh: '选中一段不再翻成源码', en: 'selections stay rendered' },
-    '2.7.3': { zh: '本地链接能跳了', en: 'local links navigate' }
+    '2.7.3': { zh: '本地链接能跳了', en: 'local links navigate' },
+    '2.7.25': { zh: '菜单里能检查更新了，启动行为可选', en: 'in-app updates + startup modes' }
   }
   let updateDownloaded = false
   function showUpdateBanner(version: string): void {
@@ -2317,7 +2395,11 @@ async function init(): Promise<void> {
 
   api.onUpdateAvailable((version) => {
     updateDownloaded = false
+    // v2.7.25：autoDownload 已开——发现新版本即开始后台下载，按钮先置灰显示进度，
+    // 下完自动变「重启安装」。关掉横幅不打断下载（退出时也会自动装上）。
     showUpdateBanner(version)
+    updateBannerActionEl().textContent = isChinese() ? '下载中…' : 'Downloading…'
+    updateBannerActionEl().disabled = true
   })
   api.onUpdateDownloaded((version) => {
     updateDownloaded = true
@@ -2326,6 +2408,7 @@ async function init(): Promise<void> {
   api.onUpdateProgress((percent) => {
     if (updateDownloaded) return
     updateBannerActionEl().textContent = isChinese() ? `下载中 ${percent}%` : `Downloading ${percent}%`
+    updateBannerActionEl().disabled = true
   })
   api.onUpdateError(() => {
     if (updateDownloaded) return

@@ -120,6 +120,23 @@
   <div id="editor-region">
     <div id="editor"></div>
     <textarea id="source-editor" spellcheck="false"></textarea>
+    <!-- ColaMD CT（v2.7.25）：启动模式「显示欢迎界面」的覆盖层。主进程在
+         renderer-ready 后发 show-welcome；任何文件落进窗口（打开/新建/最近）
+         或按 Esc 都收起。 -->
+    <div id="welcome-screen" hidden>
+      <div class="welcome-card">
+        <h1 class="welcome-title">欢迎使用 ColaMD CT</h1>
+        <p class="welcome-subtitle">Typora 手感增强版 Markdown 编辑器</p>
+        <div class="welcome-actions">
+          <button id="welcome-new-btn" type="button">新建文档</button>
+          <button id="welcome-open-btn" type="button">打开文档…</button>
+        </div>
+        <div class="welcome-recent">
+          <div class="welcome-recent-title">最近的文档</div>
+          <ul id="welcome-recent-list"></ul>
+        </div>
+      </div>
+    </div>
   </div>
   <div id="update-banner" hidden>
     <span id="update-banner-text">发现新版本</span>

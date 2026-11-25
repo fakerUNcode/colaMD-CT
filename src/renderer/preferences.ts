@@ -48,7 +48,11 @@ export async function showPreferences(): Promise<void> {
     narrow: zh ? '窄' : 'Narrow',
     standard: zh ? '标准' : 'Standard',
     wide: zh ? '宽' : 'Wide',
-    restore: zh ? '启动时打开上次文档' : 'Reopen last document at launch',
+    // 启动行为（v2.7.25 三选项）
+    startupMode: zh ? '启动时' : 'On launch',
+    startupBlank: zh ? '新建文件' : 'New blank file',
+    startupRestore: zh ? '打开上次会话的所有文件' : 'Reopen tabs from last session',
+    startupWelcome: zh ? '显示欢迎界面' : 'Show welcome screen',
     viewHint: zh ? '视图类设置即时生效' : 'View settings apply instantly',
     // Markdown
     looseEmphasis: zh ? '宽松强调（中文标点友好）' : 'Loose emphasis (CJK punctuation)',
@@ -230,10 +234,23 @@ export async function showPreferences(): Promise<void> {
     widthSel.addEventListener('change', () => void window.electronAPI?.appMenuAction('set-page-width', widthSel.value))
     widthRow.appendChild(widthSel)
 
-    const restoreBody = sectionCard(panes.editor, zh ? '启动' : 'Startup')
-    void window.electronAPI?.getRestoreOnLaunch().then((on) => {
-      toggleOf(restoreBody, t.restore, '', on, (next) => void window.electronAPI?.setRestoreOnLaunch(next))
-    })
+    // 启动行为三选项（v2.7.25）：新建文件 / 打开上次会话的所有文件 / 显示欢迎界面，
+    // 即时生效（走 set-startup-mode，住 recent.json）。老的布尔开关就此退役。
+    const startupBody = sectionCard(panes.editor, zh ? '启动' : 'Startup')
+    const startupRow = rowOf(startupBody, t.startupMode)
+    const mountStartupSelect = (mode: string): void => {
+      const startupSel = selectOf([
+        ['blank', t.startupBlank],
+        ['restore', t.startupRestore],
+        ['welcome', t.startupWelcome],
+      ], mode)
+      startupSel.addEventListener('change', () => {
+        void window.electronAPI?.setStartupMode(startupSel.value as 'blank' | 'restore' | 'welcome')
+      })
+      startupRow.appendChild(startupSel)
+    }
+    const mode = await window.electronAPI?.getStartupMode()
+    mountStartupSelect(mode ?? 'blank')
   }
 
   // ════════ 分区二：Markdown 方言（即时生效） ════════

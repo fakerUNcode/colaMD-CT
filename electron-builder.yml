@@ -121,6 +121,12 @@ nsis:
   allowToChangeInstallationDirectory: true
   shortcutName: ColaMD CT
 
-# ColaMD CT: in-app updates are disabled on purpose. This build points at no
-# release feed; auto-updating would install the official ColaMD over this
-# enhanced build. Update by rebuilding from source instead.
+# ColaMD CT：v2.7.25 起接上自己的更新源（仓库是 PUBLIC 的，release workflow 已在
+# 发布 latest.yml / latest-mac.yml / latest-linux.yml 与 blockmap，差分包也齐）。
+# 这个块只为生成 app-update.yml（更新器的取货地址）；CI 依旧 --publish never，
+# 发布动作还是 release.yml 里的 softprops/action-gh-release。
+publish:
+  provider: github
+  owner: fakerUNcode
+  repo: colaMD-CT
+  updaterCacheDirName: colamd-ct-updater
