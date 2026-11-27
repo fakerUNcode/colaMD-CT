@@ -2379,7 +2379,8 @@ async function init(): Promise<void> {
     '2.7.1-beta.1': { zh: '选中一段不再翻成源码', en: 'selections stay rendered' },
     '2.7.3': { zh: '本地链接能跳了', en: 'local links navigate' },
     '2.7.25': { zh: '菜单里能检查更新了，启动行为可选', en: 'in-app updates + startup modes' },
-    '2.7.26': { zh: '支持滑块调节字体大小与粗细', en: 'font size & weight sliders' }
+    '2.7.26': { zh: '支持滑块调节字体大小与粗细', en: 'font size & weight sliders' },
+    '2.7.27': { zh: '优化羊皮纸主题中英与代码字体', en: 'improved Sepia theme fonts' }
   }
   let updateDownloaded = false
   function showUpdateBanner(version: string): void {

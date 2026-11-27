@@ -4,6 +4,15 @@
 
 ---
 
+## v2.7.27 · 羊皮纸主题中英与代码字体优化
+
+优化羊皮纸（Sepia）主题在多平台下的长文阅读与技术文档混排体验：
+
+- **正文与标题字体栈**：优先为英文与数字匹配长文阅读衬线体（`Literata` / `Charter` / `Source Serif 4` / `Georgia`），为中文匹配纸面阅读字体（`LXGW WenKai` / 思源宋体 / `Songti SC` / `PingFang SC` / `Microsoft YaHei`），避免 Windows 下缺少衬线字体时退回锯齿感较强的系统宋体
+- **代码字体栈**：在羊皮纸主题中覆盖 `--font-mono`（`JetBrains Mono` / `SF Mono` / `Cascadia Mono` / `Fira Code` / `Menlo` / `Consolas` + 中文无衬线回退），兼顾英文代码等宽对齐与代码内中文注释的清晰显示
+
+---
+
 ## v2.7.26 · 字体大小与粗细滑块调节
 
 **1. 偏好设置新增字体大小与粗细滑块（即时生效）**

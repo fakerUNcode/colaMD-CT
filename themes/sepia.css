@@ -18,10 +18,11 @@
   --table-header-bg: #ece2cb;
   --selection-bg: rgba(160, 98, 45, 0.15);
   --highlight-bg: #f2dfa8;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', 'Fira Code', Menlo, Consolas, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', monospace;
 }
 
 #editor .cm-content {
-  font-family: Georgia, 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', serif;
+  font-family: 'Literata', 'Charter', 'Source Serif 4', Georgia, 'LXGW WenKai', 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', serif;
   line-height: 1.85;
 }
 

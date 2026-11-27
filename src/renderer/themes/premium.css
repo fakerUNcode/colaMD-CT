@@ -21,6 +21,7 @@ body.theme-sepia {
   --table-header-bg: #ece2cb;
   --selection-bg: rgba(160, 98, 45, 0.15);
   --highlight-bg: #f2dfa8;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', 'Fira Code', Menlo, Consolas, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', monospace;
 }
 /* ---------- 简白 Notion ----------
    Clean minimal workspace. Warm off-black text on white,
