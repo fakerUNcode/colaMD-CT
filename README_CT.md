@@ -169,6 +169,10 @@ wsl -d Ubuntu-24.04 -- bash build-tools/wsl-build.sh all
 
 同步优化内置与独立羊皮纸（`sepia`）主题的字体栈：英文与数字优先使用长文阅读衬线体，中文优先使用 `LXGW WenKai` / 思源宋体 / `PingFang SC` / `Microsoft YaHei`，代码块与行内代码补充中文无衬线兜底，提升中英混排与技术文档的跨平台阅读观感。
 
+## 内置开源字体与羊皮纸界面同步（v2.7.28）
+
+内置 `LXGW WenKai`（Light / Regular / Medium 完整字库）、`Literata`（可变正斜体）与 `JetBrains Mono`（可变正斜体）的 WOFF2 字体文件，三平台离线可用：字体选择器下拉置顶展示并标注「内置」标签；羊皮纸主题默认同步应用到正文与界面外壳（顶栏、文件面板、大纲与弹窗），其他主题保持原有无衬线风格并补齐中文兜底。
+
 ## 图片工作流
 
 ### 插入方式

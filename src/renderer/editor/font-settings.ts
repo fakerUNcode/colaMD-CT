@@ -26,6 +26,15 @@ export const FONT_WEIGHT_MIN = 100
 export const FONT_WEIGHT_MAX = 900
 export const FONT_WEIGHT_STEP = 50
 
+/** 应用内置的开源字体（经 themes/fonts.css @font-face 加载，在字体选择器中置顶展示）。 */
+export const BUNDLED_FONTS = [
+  'LXGW WenKai',
+  'Literata',
+  'JetBrains Mono'
+] as const
+
+const BUNDLED_FONT_SET = new Set(BUNDLED_FONTS.map((f) => f.toLowerCase()))
+
 const DEFAULT_FONT_SIZE = 16
 const DEFAULT_FONT_WEIGHT = 400
 
@@ -214,6 +223,7 @@ export function showFontSettingsModal(): void {
       : 'Scale 100–900 (step 50) for variable fonts; visible steps depend on the active font.',
     applyToUi: zh ? '同步应用到界面文字（顶栏、文件面板等）' : 'Also apply to UI text (titlebar, file panel, etc.)',
     defaultTag: zh ? '默认' : 'Default',
+    bundledTag: zh ? '内置' : 'Built-in',
     reset: zh ? '恢复默认' : 'Reset',
     cancel: zh ? '取消' : 'Cancel',
     apply: zh ? '应用' : 'Apply'
@@ -251,10 +261,11 @@ export function showFontSettingsModal(): void {
   const fontList = document.createElement('div')
   fontList.className = 'font-modal-list'
   fontList.style.display = 'none'
-  let fontNames: string[] = []
+  let fontNames: string[] = [...BUNDLED_FONTS]
   void window.electronAPI.listSystemFonts?.().then((fonts) => {
     if (!fonts.length) return
-    fontNames = fonts
+    const systemOnly = fonts.filter((f) => !BUNDLED_FONT_SET.has(f.toLowerCase()))
+    fontNames = [...BUNDLED_FONTS, ...systemOnly]
     if (document.activeElement === familyInput) renderFontList(familyInput.value)
   })
 
@@ -271,7 +282,16 @@ export function showFontSettingsModal(): void {
     fontList.replaceChildren(...items.map((name) => {
       const item = document.createElement('div')
       item.className = 'font-modal-list-item'
-      item.textContent = name
+      item.dataset.fontName = name
+      const label = document.createElement('span')
+      label.textContent = name
+      item.appendChild(label)
+      if (BUNDLED_FONT_SET.has(name.toLowerCase())) {
+        const badge = document.createElement('span')
+        badge.className = 'font-modal-list-badge'
+        badge.textContent = t.bundledTag
+        item.appendChild(badge)
+      }
       item.addEventListener('mousedown', (e) => {
         e.preventDefault()
         familyInput.value = name
@@ -315,7 +335,8 @@ export function showFontSettingsModal(): void {
       items[activeIndex].scrollIntoView({ block: 'nearest' })
     } else if (e.key === 'Enter' && activeIndex >= 0) {
       e.preventDefault()
-      familyInput.value = (items[activeIndex] as HTMLElement).textContent ?? ''
+      const el = items[activeIndex] as HTMLElement
+      familyInput.value = el.dataset.fontName ?? el.textContent ?? ''
       hideFontList()
       updatePreview()
     } else if (e.key === 'Escape') {

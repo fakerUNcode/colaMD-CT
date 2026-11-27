@@ -1,0 +1,61 @@
+/* 内置开源字体（SIL OFL 1.1），离线可用、Windows / macOS / Linux 渲染一致。
+ * - LXGW WenKai（霞鹜文楷 v1.530 完整字库）：Light / Regular / Medium
+ * - Literata（v3.103 可变字体）：200–900 连续字重（正体 + 斜体）
+ * - JetBrains Mono（v2.304 可变字体）：100–800 连续字重（正体 + 斜体）
+ */
+
+@font-face {
+  font-family: 'LXGW WenKai';
+  src: url('../assets/fonts/LXGWWenKai-Light.woff2') format('woff2');
+  font-weight: 100 350;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'LXGW WenKai';
+  src: url('../assets/fonts/LXGWWenKai-Regular.woff2') format('woff2');
+  font-weight: 400 450;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'LXGW WenKai';
+  src: url('../assets/fonts/LXGWWenKai-Medium.woff2') format('woff2');
+  font-weight: 500 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Literata';
+  src: url('../assets/fonts/Literata-Variable.woff2') format('woff2');
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Literata';
+  src: url('../assets/fonts/Literata-Italic-Variable.woff2') format('woff2');
+  font-weight: 200 900;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Italic-Variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-style: italic;
+  font-display: swap;
+}

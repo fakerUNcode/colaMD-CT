@@ -18,6 +18,7 @@
   --table-header-bg: #ece2cb;
   --selection-bg: rgba(160, 98, 45, 0.15);
   --highlight-bg: #f2dfa8;
+  --font-body: 'Literata', 'Charter', 'Source Serif 4', Georgia, 'LXGW WenKai', 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', 'Fira Code', Menlo, Consolas, 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', monospace;
 }
 

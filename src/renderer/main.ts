@@ -21,6 +21,7 @@ import { showPreferences } from './preferences'
 import { setupAppMenu, bindModuleButtons, refreshCustomThemes, MENU_MODULES } from './app-menu'
 import { mergeAccelerators } from '../shared/commands'
 import type { AppSettings } from '../shared/settings-types'
+import './themes/fonts.css'
 import './themes/base.css'
 import './themes/premium.css'
 import './themes/editor-preview.css'
@@ -2380,7 +2381,8 @@ async function init(): Promise<void> {
     '2.7.3': { zh: '本地链接能跳了', en: 'local links navigate' },
     '2.7.25': { zh: '菜单里能检查更新了，启动行为可选', en: 'in-app updates + startup modes' },
     '2.7.26': { zh: '支持滑块调节字体大小与粗细', en: 'font size & weight sliders' },
-    '2.7.27': { zh: '优化羊皮纸主题中英与代码字体', en: 'improved Sepia theme fonts' }
+    '2.7.27': { zh: '优化羊皮纸主题中英与代码字体', en: 'improved Sepia theme fonts' },
+    '2.7.28': { zh: '内置霞鹜文楷等开源字体，羊皮纸界面同步', en: 'bundled LXGW WenKai/Literata/JetBrains Mono fonts' }
   }
   let updateDownloaded = false
   function showUpdateBanner(version: string): void {
