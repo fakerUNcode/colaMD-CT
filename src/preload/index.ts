@@ -90,9 +90,9 @@ export interface ElectronAPI {
   onSiblingsChanged: (callback: (files: SiblingFile[]) => void) => void
   onToggleFilePanel: (callback: () => void) => void
   onToggleSourceMode: (callback: () => void) => void
-  setEditorFont: (prefs: { family: string; size: number }) => Promise<void>
+  setEditorFont: (prefs: { family: string; size: number; weight?: number; applyToUi?: boolean }) => Promise<void>
   listSystemFonts: () => Promise<string[]>
-  onEditorFontChanged: (callback: (prefs: { family: string; size: number }) => void) => void
+  onEditorFontChanged: (callback: (prefs: { family: string; size: number; weight?: number; applyToUi?: boolean }) => void) => void
   onOpenFontSettings: (callback: () => void) => void
   onStepFont: (callback: (delta: number) => void) => void
   reportExternalConflict: (content: string) => Promise<void>
@@ -290,13 +290,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onToggleSourceMode: (callback: () => void) => {
     ipcRenderer.on('toggle-source-mode', () => callback())
   },
-  setEditorFont: (prefs: { family: string; size: number }) => {
+  setEditorFont: (prefs: { family: string; size: number; weight?: number; applyToUi?: boolean }) => {
     return ipcRenderer.invoke('set-editor-font', prefs)
   },
   listSystemFonts: () => {
     return ipcRenderer.invoke('list-system-fonts')
   },
-  onEditorFontChanged: (callback: (prefs: { family: string; size: number }) => void) => {
+  onEditorFontChanged: (callback: (prefs: { family: string; size: number; weight?: number; applyToUi?: boolean }) => void) => {
     ipcRenderer.on('editor-font-changed', (_event, prefs) => callback(prefs))
   },
   onOpenFontSettings: (callback: () => void) => {

@@ -11,7 +11,7 @@ import { enterPaperLayout, exitPaperLayout } from './print-layout'
 import { SearchPanel } from './editor/search-panel'
 import { applyTheme, loadSavedTheme } from './themes/theme-manager'
 import { setUiLanguage, isChinese, type UiLanguage } from './ui-language'
-import { applyEditorFont, clearEditorFont, loadSavedEditorFont, resetEditorFontSize, showFontSettingsModal, stepEditorFontSize } from './editor/font-settings'
+import { applyEditorFont, clearEditorFont, hasAnyEditorFontPref, loadSavedEditorFont, resetEditorFontSize, showFontSettingsModal, stepEditorFontSize } from './editor/font-settings'
 import { initCommandKeymap, applyKeybindings } from './editor/keymap-config'
 import { setImageDocPathProvider } from './editor/image-input'
 import { loadTableWidthsFor, runTableMenuAction, setRememberTableWidths, type TableAction } from './editor/table-ops'
@@ -2358,7 +2358,7 @@ async function init(): Promise<void> {
     externalConflictPending = false
   })
   api.onOpenFontSettings(() => showFontSettingsModal())
-  api.onEditorFontChanged((prefs) => applyEditorFont(prefs.family || prefs.size ? prefs : null))
+  api.onEditorFontChanged((prefs) => applyEditorFont(hasAnyEditorFontPref(prefs) ? prefs : null))
   api.onSetCustomCSS((css) => {
     const theme = loadSavedTheme()
     applyTheme(theme, css)
@@ -2378,7 +2378,8 @@ async function init(): Promise<void> {
     '2.7.0': { zh: '这次换了编辑器内核', en: 'new editor core' },
     '2.7.1-beta.1': { zh: '选中一段不再翻成源码', en: 'selections stay rendered' },
     '2.7.3': { zh: '本地链接能跳了', en: 'local links navigate' },
-    '2.7.25': { zh: '菜单里能检查更新了，启动行为可选', en: 'in-app updates + startup modes' }
+    '2.7.25': { zh: '菜单里能检查更新了，启动行为可选', en: 'in-app updates + startup modes' },
+    '2.7.26': { zh: '支持滑块调节字体大小与粗细', en: 'font size & weight sliders' }
   }
   let updateDownloaded = false
   function showUpdateBanner(version: string): void {

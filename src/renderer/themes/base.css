@@ -1433,8 +1433,9 @@ body.web-playground *::-webkit-scrollbar-corner {
 
 /* ===== Editor font preferences (#7752855) =====
    User preference > theme > built-in defaults. Only the editor prose and the
-   source editor are overridden; code blocks keep the theme's code font. */
-/* 字体族和字号分开挂类：只调字号时不能带上字体族那条，否则空的 var(--editor-font) 会让
+   source editor are overridden by default; code blocks keep the theme's code font.
+   When body.has-custom-ui-font is toggled on, shell UI text follows as well. */
+/* 字体族、字号、字重分开挂类：只调字号时不能带上字体族那条，否则空的 var(--editor-font) 会让
    font-family 变成无效声明，主题自己的字体被顶掉（2026-10-06 报的）。 */
 body.has-custom-font #editor .cm-content {
   font-family: var(--editor-font) !important;
@@ -1444,12 +1445,217 @@ body.has-custom-font-size #editor .cm-content {
   font-size: var(--editor-font-size, 16px) !important;
 }
 
+body.has-custom-font-weight #editor .cm-content {
+  font-weight: var(--editor-font-weight, 400) !important;
+}
+
+/* 自定义正文字重时，标题与加粗按基准字重自动抬升，避免正文调粗后失去层次对比。 */
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading1,
+body.has-custom-font-weight #editor .cm-content .cm-md-strong,
+body.has-custom-font-weight #editor .cm-content .cm-md-html-b {
+  font-weight: var(--editor-font-weight-strong, 700) !important;
+}
+
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading2,
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading3,
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading4,
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading5,
+body.has-custom-font-weight #editor .cm-content .cm-md-atxheading6,
+body.has-custom-font-weight #editor .cm-content .cm-md-table-widget th {
+  font-weight: var(--editor-font-weight-heading, 600) !important;
+}
+
 body.has-custom-font #source-editor {
   font-family: var(--editor-font) !important;
 }
 
 body.has-custom-font-size #source-editor {
   font-size: var(--editor-font-size, 14px) !important;
+}
+
+body.has-custom-font-weight #source-editor {
+  font-weight: var(--editor-font-weight, 400) !important;
+}
+
+/* 可选：连带顶栏、文件面板、大纲、菜单与弹窗等界面文字一起调整。
+   顶栏行高仍锚在 --chrome-row-height（36px），字号按比例缩放并夹紧上下限，
+   防止红绿灯或窗口按钮错位、标签文字被裁切。 */
+body.has-custom-ui-font.has-custom-font,
+body.has-custom-ui-font.has-custom-font button,
+body.has-custom-ui-font.has-custom-font input,
+body.has-custom-ui-font.has-custom-font select {
+  font-family: var(--editor-font);
+}
+
+body.has-custom-ui-font.has-custom-font .colamd-pref-key-binding,
+body.has-custom-ui-font.has-custom-font .colamd-menu-hint {
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', Menlo, monospace);
+}
+
+body.has-custom-ui-font.has-custom-font-weight,
+body.has-custom-ui-font.has-custom-font-weight button,
+body.has-custom-ui-font.has-custom-font-weight input,
+body.has-custom-ui-font.has-custom-font-weight select,
+body.has-custom-ui-font.has-custom-font-weight textarea,
+body.has-custom-ui-font.has-custom-font-weight .tab-entry,
+body.has-custom-ui-font.has-custom-font-weight #save-status,
+body.has-custom-ui-font.has-custom-font-weight .toolbar-tip,
+body.has-custom-ui-font.has-custom-font-weight #hover-tip,
+body.has-custom-ui-font.has-custom-font-weight .file-panel-tabs button,
+body.has-custom-ui-font.has-custom-font-weight #file-list button,
+body.has-custom-ui-font.has-custom-font-weight #outline-list button,
+body.has-custom-ui-font.has-custom-font-weight .colamd-menu-item,
+body.has-custom-ui-font.has-custom-font-weight .font-modal-list-item {
+  font-weight: var(--editor-font-weight, 400);
+}
+
+body.has-custom-ui-font.has-custom-font-weight #file-list button.directory,
+body.has-custom-ui-font.has-custom-font-weight .colamd-pref-section-title,
+body.has-custom-ui-font.has-custom-font-weight .colamd-pref-nav-item.active,
+body.has-custom-ui-font.has-custom-font-weight .colamd-menu-item-primary,
+body.has-custom-ui-font.has-custom-font-weight .math-modal h3 {
+  font-weight: var(--editor-font-weight-heading, 600);
+}
+
+body.has-custom-ui-font.has-custom-font-size .tab-entry {
+  font-size: clamp(10px, calc(12px * var(--editor-font-size-ratio, 1)), 18px);
+}
+
+body.has-custom-ui-font.has-custom-font-size .tab-entry-name {
+  line-height: clamp(18px, calc(20px * var(--editor-font-size-ratio, 1)), 28px);
+}
+
+body.has-custom-ui-font.has-custom-font-size #save-status,
+body.has-custom-ui-font.has-custom-font-size #hover-tip {
+  font-size: clamp(10px, calc(11px * var(--editor-font-size-ratio, 1)), 15px);
+}
+
+body.has-custom-ui-font.has-custom-font-size .toolbar-tip,
+body.has-custom-ui-font.has-custom-font-size .file-panel-tabs button,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-hint,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-row > label,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-label {
+  font-size: clamp(10px, calc(12px * var(--editor-font-size-ratio, 1)), 18px);
+}
+
+body.has-custom-ui-font.has-custom-font-size #file-list button,
+body.has-custom-ui-font.has-custom-font-size #outline-list button,
+body.has-custom-ui-font.has-custom-font-size #file-list .file-empty,
+body.has-custom-ui-font.has-custom-font-size .colamd-menu-item,
+body.has-custom-ui-font.has-custom-font-size .search-input,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-nav-item,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-toggle-name,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-section-title,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-select,
+body.has-custom-ui-font.has-custom-font-size .colamd-pref-input,
+body.has-custom-ui-font.has-custom-font-size #update-banner {
+  font-size: clamp(11px, calc(13px * var(--editor-font-size-ratio, 1)), 21px);
+}
+
+/* 共享滑块控件（偏好设置与编辑器字体弹窗共用） */
+.colamd-slider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.colamd-slider-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.colamd-slider-head > label {
+  color: var(--text-secondary, var(--text-muted, var(--text-color)));
+  font-size: 12px;
+}
+
+.colamd-slider-value {
+  color: var(--text-color);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.colamd-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  margin: 6px 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-color) 16%, transparent);
+  cursor: pointer;
+}
+
+.colamd-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--link-color);
+  border: 2px solid var(--bg-color);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.colamd-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.colamd-slider::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--link-color);
+  border: 2px solid var(--bg-color);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+}
+
+.font-modal-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-color);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.font-modal-checkbox input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--link-color);
+  cursor: pointer;
+}
+
+.colamd-pref-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.colamd-pref-inline-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-color);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.colamd-pref-inline-btn:hover:not(:disabled) {
+  background: var(--code-bg);
+}
+
+.colamd-pref-inline-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* Font settings modal (reuses math-modal shell) */

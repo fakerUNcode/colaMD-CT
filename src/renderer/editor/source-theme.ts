@@ -13,11 +13,11 @@ import { EditorView } from '@codemirror/view'
 import { tags as t } from '@lezer/highlight'
 
 export const markdownHighlightStyle = HighlightStyle.define([
-  { tag: t.heading1, fontWeight: '700' },
-  { tag: t.heading2, fontWeight: '700' },
-  { tag: t.heading3, fontWeight: '600' },
-  { tag: [t.heading4, t.heading5, t.heading6], fontWeight: '600' },
-  { tag: t.strong, fontWeight: '700' },
+  { tag: t.heading1, fontWeight: 'var(--editor-font-weight-strong, 700)' },
+  { tag: t.heading2, fontWeight: 'var(--editor-font-weight-strong, 700)' },
+  { tag: t.heading3, fontWeight: 'var(--editor-font-weight-heading, 600)' },
+  { tag: [t.heading4, t.heading5, t.heading6], fontWeight: 'var(--editor-font-weight-heading, 600)' },
+  { tag: t.strong, fontWeight: 'var(--editor-font-weight-strong, 700)' },
   { tag: t.emphasis, fontStyle: 'italic' },
   { tag: t.strikethrough, textDecoration: 'line-through' },
   { tag: t.link, color: 'var(--link-color)' },

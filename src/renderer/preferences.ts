@@ -12,6 +12,22 @@ import {
   type EditorCommandSpec,
 } from '../shared/commands'
 import type { AppSettings, ImageSettings, MarkdownDialectSettings, TableSettings } from '../shared/settings-types'
+import {
+  EDITOR_FONT_CHANGE_EVENT,
+  FONT_SIZE_MAX,
+  FONT_SIZE_MIN,
+  FONT_SIZE_STEP,
+  FONT_WEIGHT_MAX,
+  FONT_WEIGHT_MIN,
+  FONT_WEIGHT_STEP,
+  formatFontWeightLabel,
+  getEffectiveEditorFontSize,
+  getEffectiveEditorFontWeight,
+  loadSavedEditorFont,
+  resetEditorTypography,
+  showFontSettingsModal,
+  updateEditorFontPrefs,
+} from './editor/font-settings'
 import { applyKeybindings } from './editor/keymap-config'
 import { isChinese } from './ui-language'
 
@@ -48,6 +64,21 @@ export async function showPreferences(): Promise<void> {
     narrow: zh ? '窄' : 'Narrow',
     standard: zh ? '标准' : 'Standard',
     wide: zh ? '宽' : 'Wide',
+    // 字体排版
+    typography: zh ? '字体大小与粗细' : 'Font size & weight',
+    typographyHint: zh ? '拖动即时生效，默认仅作用于编辑器正文与源码区' : 'Applies instantly; by default affects editor prose & source view only',
+    fontSize: zh ? '字体大小' : 'Font size',
+    fontWeight: zh ? '字体粗细' : 'Font weight',
+    fontWeightHint: zh
+      ? '刻度 100–900（步进 50），可变字体支持精细调节；实际可见档位取决于当前字体。'
+      : 'Scale 100–900 (step 50) for variable fonts; visible steps depend on the active font.',
+    applyFontToUi: zh ? '同步应用到界面文字' : 'Also apply to UI text',
+    applyFontToUiHint: zh
+      ? '勾选后连带顶栏标签、文件面板、大纲等界面文字一起调整；不勾选则只调编辑器正文与源码区。'
+      : 'When enabled, also adjusts titlebar tabs, file panel, outline, and other UI text.',
+    defaultTag: zh ? '默认' : 'Default',
+    resetTypography: zh ? '恢复默认字号与字重' : 'Reset size & weight',
+    chooseFontFamily: zh ? '选择字体族…' : 'Choose font family…',
     // 启动行为（v2.7.25 三选项）
     startupMode: zh ? '启动时' : 'On launch',
     startupBlank: zh ? '新建文件' : 'New blank file',
@@ -233,6 +264,122 @@ export async function showPreferences(): Promise<void> {
     const widthSel = selectOf([['narrow', t.narrow], ['standard', t.standard], ['wide', t.wide]], localStorage.getItem('colamd-page-width') || 'standard')
     widthSel.addEventListener('change', () => void window.electronAPI?.appMenuAction('set-page-width', widthSel.value))
     widthRow.appendChild(widthSel)
+
+    // 字体大小与粗细（即时生效，默认仅作用于正文与源码区，可选同步界面文字）
+    const typoBody = sectionCard(panes.editor, t.typography, t.typographyHint)
+
+    const sizeRow = document.createElement('div')
+    sizeRow.className = 'colamd-slider-row'
+    const sizeHead = document.createElement('div')
+    sizeHead.className = 'colamd-slider-head'
+    const sizeLabel = document.createElement('label')
+    sizeLabel.textContent = t.fontSize
+    const sizeValue = document.createElement('span')
+    sizeValue.className = 'colamd-slider-value'
+    const sizeSlider = document.createElement('input')
+    sizeSlider.type = 'range'
+    sizeSlider.className = 'colamd-slider'
+    sizeSlider.min = String(FONT_SIZE_MIN)
+    sizeSlider.max = String(FONT_SIZE_MAX)
+    sizeSlider.step = String(FONT_SIZE_STEP)
+    sizeHead.append(sizeLabel, sizeValue)
+    sizeRow.append(sizeHead, sizeSlider)
+    typoBody.appendChild(sizeRow)
+
+    const weightRow = document.createElement('div')
+    weightRow.className = 'colamd-slider-row'
+    const weightHead = document.createElement('div')
+    weightHead.className = 'colamd-slider-head'
+    const weightLabel = document.createElement('label')
+    weightLabel.textContent = t.fontWeight
+    const weightValue = document.createElement('span')
+    weightValue.className = 'colamd-slider-value'
+    const weightSlider = document.createElement('input')
+    weightSlider.type = 'range'
+    weightSlider.className = 'colamd-slider'
+    weightSlider.min = String(FONT_WEIGHT_MIN)
+    weightSlider.max = String(FONT_WEIGHT_MAX)
+    weightSlider.step = String(FONT_WEIGHT_STEP)
+    const weightHint = document.createElement('div')
+    weightHint.className = 'colamd-pref-hint'
+    weightHint.textContent = t.fontWeightHint
+    weightHead.append(weightLabel, weightValue)
+    weightRow.append(weightHead, weightSlider, weightHint)
+    typoBody.appendChild(weightRow)
+
+    const uiScopeRow = document.createElement('label')
+    uiScopeRow.className = 'colamd-pref-toggle'
+    const uiScopeText = document.createElement('div')
+    uiScopeText.className = 'colamd-pref-toggle-text'
+    const uiScopeName = document.createElement('div')
+    uiScopeName.className = 'colamd-pref-toggle-name'
+    uiScopeName.textContent = t.applyFontToUi
+    const uiScopeHint = document.createElement('div')
+    uiScopeHint.className = 'colamd-pref-hint'
+    uiScopeHint.textContent = t.applyFontToUiHint
+    uiScopeText.append(uiScopeName, uiScopeHint)
+    const uiScopeBox = document.createElement('input')
+    uiScopeBox.type = 'checkbox'
+    uiScopeBox.className = 'colamd-pref-switch'
+    uiScopeRow.append(uiScopeText, uiScopeBox)
+    typoBody.appendChild(uiScopeRow)
+
+    const typoActions = document.createElement('div')
+    typoActions.className = 'colamd-pref-inline-actions'
+    const resetTypoBtn = document.createElement('button')
+    resetTypoBtn.type = 'button'
+    resetTypoBtn.className = 'colamd-pref-inline-btn'
+    resetTypoBtn.textContent = t.resetTypography
+    const openFontBtn = document.createElement('button')
+    openFontBtn.type = 'button'
+    openFontBtn.className = 'colamd-pref-inline-btn'
+    openFontBtn.textContent = t.chooseFontFamily
+    typoActions.append(resetTypoBtn, openFontBtn)
+    typoBody.appendChild(typoActions)
+
+    const syncTypographyControls = (): void => {
+      const saved = loadSavedEditorFont()
+      const effSize = getEffectiveEditorFontSize()
+      const effWeight = getEffectiveEditorFontWeight()
+      const hasCustomSize = Boolean(saved?.size)
+      const hasCustomWeight = Boolean(saved?.weight)
+      const hasApplyToUi = Boolean(saved?.applyToUi)
+
+      sizeSlider.value = String(effSize)
+      sizeValue.textContent = hasCustomSize ? `${effSize}px` : `${t.defaultTag} (${effSize}px)`
+      weightSlider.value = String(effWeight)
+      weightValue.textContent = hasCustomWeight
+        ? formatFontWeightLabel(effWeight, zh)
+        : `${t.defaultTag} (${formatFontWeightLabel(effWeight, zh)})`
+      uiScopeBox.checked = hasApplyToUi
+      resetTypoBtn.disabled = !hasCustomSize && !hasCustomWeight && !hasApplyToUi
+    }
+    syncTypographyControls()
+
+    sizeSlider.addEventListener('input', () => {
+      updateEditorFontPrefs({ size: Number(sizeSlider.value) })
+    })
+    weightSlider.addEventListener('input', () => {
+      updateEditorFontPrefs({ weight: Number(weightSlider.value) })
+    })
+    uiScopeBox.addEventListener('change', () => {
+      updateEditorFontPrefs({ applyToUi: uiScopeBox.checked })
+    })
+    resetTypoBtn.addEventListener('click', () => {
+      resetEditorTypography()
+    })
+    openFontBtn.addEventListener('click', () => {
+      showFontSettingsModal()
+    })
+
+    const onFontChange = (): void => {
+      if (!overlay.isConnected) {
+        window.removeEventListener(EDITOR_FONT_CHANGE_EVENT, onFontChange)
+        return
+      }
+      syncTypographyControls()
+    }
+    window.addEventListener(EDITOR_FONT_CHANGE_EVENT, onFontChange)
 
     // 启动行为三选项（v2.7.25）：新建文件 / 打开上次会话的所有文件 / 显示欢迎界面，
     // 即时生效（走 set-startup-mode，住 recent.json）。老的布尔开关就此退役。
